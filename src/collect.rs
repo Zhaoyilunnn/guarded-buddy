@@ -96,7 +96,7 @@ pub fn collect(
 
 #[cfg(test)]
 mod tests {
-    use super::{CollectOutcome, DayBucket, collect, group_by_day};
+    use super::{CollectOutcome, collect, group_by_day};
     use crate::domain::{AgentKind, DateRange, Message, MessageContent, Role, Session};
     use crate::sources::{HistorySource, SourceError};
     use chrono::{DateTime, Local, NaiveDate, TimeZone};

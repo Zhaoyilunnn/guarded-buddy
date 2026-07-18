@@ -48,11 +48,19 @@ pub trait HistorySource: Send + Sync {
 
 /// 默认注册表：Codex → Cursor → Claude → Gemini。
 pub fn default_sources(home: &Path) -> Vec<Box<dyn HistorySource>> {
+    default_sources_opts(home, false)
+}
+
+/// 带开关的注册表：`include_prompt_history` 透传给 Gemini 源。
+pub fn default_sources_opts(
+    home: &Path,
+    include_prompt_history: bool,
+) -> Vec<Box<dyn HistorySource>> {
     vec![
         Box::new(codex::CodexSource::new(home)),
         Box::new(cursor::CursorSource::new(home)),
         Box::new(claude::ClaudeSource::new(home)),
-        Box::new(gemini::GeminiSource::new(home)),
+        Box::new(gemini::GeminiSource::new(home).include_prompt_history(include_prompt_history)),
     ]
 }
 

@@ -34,6 +34,14 @@ pub enum ReportError {
     ApiStatus { status: u16, body: String },
     #[error("无法解析 API 响应：{0}")]
     ApiParse(String),
+    #[error("采集目录不存在：{0}（请先运行 collect）")]
+    DirNotFound(PathBuf),
+    #[error("采集目录 {0} 下没有日记录文件（请先运行 collect）")]
+    EmptyDir(PathBuf),
+    #[error("未知的 CLI 预设：{0}（可选: codex, claude, agy, gemini；或用 --cmd 自定义）")]
+    UnknownCliPreset(String),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 /// prompt 组装模式：CLI 后端用文件清单（让它自己读目录），API 后端内嵌全文。
@@ -114,34 +122,90 @@ pub fn build_stats(buckets: &[DayBucket]) -> String {
         return "本周无对话记录".to_string();
     }
     let mut per_agent: BTreeMap<AgentKind, usize> = BTreeMap::new();
-    let mut sessions = 0usize;
     let mut messages = 0usize;
     for bucket in buckets {
-        sessions += bucket.sessions.len();
         messages += bucket.message_count();
         for s in &bucket.sessions {
             *per_agent.entry(s.agent).or_default() += 1;
         }
     }
+    format_stats(buckets.len(), &per_agent, messages)
+}
+
+fn format_stats(days: usize, per_agent: &BTreeMap<AgentKind, usize>, messages: usize) -> String {
+    let sessions: usize = per_agent.values().sum();
     let agent_part = per_agent
         .iter()
         .map(|(kind, n)| format!("{} × {}", kind.display_name(), n))
         .collect::<Vec<_>>()
         .join(" · ");
-    format!(
-        "有记录 {} 天 · 会话 {} 个（{}）· 消息 {} 条",
-        buckets.len(),
-        sessions,
-        agent_part,
-        messages
-    )
+    format!("有记录 {days} 天 · 会话 {sessions} 个（{agent_part}）· 消息 {messages} 条")
+}
+
+fn agent_from_heading(heading: &str) -> Option<AgentKind> {
+    AgentKind::ALL
+        .into_iter()
+        .find(|k| k.display_name() == heading)
+}
+
+/// 已采集目录的内容 + 由文件反推的统计（尊重用户对日文件的手工编辑）。
+#[derive(Debug)]
+pub struct DirSummary {
+    /// （文件名， 内容）按文件名排序，不含 index.md。
+    pub files: Vec<(String, String)>,
+    pub stats: String,
+}
+
+/// 读取 `out/<range>/` 下所有日文件并统计会话/消息数。
+/// 通过扫描我们自己渲染的 markdown 结构（`## Agent` 段、`### 会话` 头、
+/// `**👤/**🤖/**🔧` 消息行）计数。
+pub fn load_collected_dir(dir: &Path) -> Result<DirSummary, ReportError> {
+    if !dir.is_dir() {
+        return Err(ReportError::DirNotFound(dir.to_path_buf()));
+    }
+    let mut names: Vec<String> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".md") && n != "index.md")
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        return Err(ReportError::EmptyDir(dir.to_path_buf()));
+    }
+    let mut files = Vec::new();
+    let mut per_agent: BTreeMap<AgentKind, usize> = BTreeMap::new();
+    let mut messages = 0usize;
+    for name in names {
+        let content = std::fs::read_to_string(dir.join(&name))?;
+        let mut current_agent: Option<AgentKind> = None;
+        for line in content.lines() {
+            if let Some(heading) = line.strip_prefix("## ") {
+                current_agent = agent_from_heading(heading.trim());
+            } else if line.starts_with("### 会话") {
+                if let Some(kind) = current_agent {
+                    *per_agent.entry(kind).or_default() += 1;
+                }
+            } else if line.starts_with("**👤")
+                || line.starts_with("**🤖")
+                || line.starts_with("**🔧")
+            {
+                messages += 1;
+            }
+        }
+        files.push((name, content));
+    }
+    let stats = format_stats(files.len(), &per_agent, messages);
+    Ok(DirSummary { files, stats })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{INLINE_BUDGET, PromptMode, assemble_prompt, build_stats};
+    use super::{
+        INLINE_BUDGET, PromptMode, ReportError, assemble_prompt, build_stats, load_collected_dir,
+    };
     use crate::collect::DayBucket;
     use crate::domain::{AgentKind, Message, MessageContent, Role, Session};
+    use crate::render::daily::render_daily;
     use chrono::{DateTime, Local, NaiveDate, TimeZone};
     use std::path::Path;
 
@@ -239,5 +303,48 @@ mod tests {
     #[test]
     fn build_stats_empty() {
         assert_eq!(build_stats(&[]), "本周无对话记录");
+    }
+
+    // ---------- load_collected_dir ----------
+
+    fn write_day_file(dir: &Path, name: &str, sessions: &[Session]) {
+        let date = NaiveDate::parse_from_str(name.trim_end_matches(".md"), "%Y-%m-%d").unwrap();
+        std::fs::write(dir.join(name), render_daily(date, sessions)).unwrap();
+    }
+
+    #[test]
+    fn load_collected_dir_counts_sessions_and_messages_per_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write_day_file(
+            dir,
+            "2026-07-15.md",
+            &[session(AgentKind::Codex, "c1", 3), session(AgentKind::Claude, "a1", 2)],
+        );
+        write_day_file(dir, "2026-07-16.md", &[session(AgentKind::Codex, "c2", 5)]);
+        std::fs::write(dir.join("index.md"), "# 索引（不应计入）\n").unwrap();
+
+        let summary = load_collected_dir(dir).unwrap();
+        assert_eq!(summary.files.len(), 2, "index.md 应被排除");
+        assert_eq!(summary.files[0].0, "2026-07-15.md");
+        assert!(summary.files[0].1.contains("AI 对话记录"));
+        assert_eq!(
+            summary.stats,
+            "有记录 2 天 · 会话 3 个（Codex × 2 · Claude Code × 1）· 消息 10 条"
+        );
+    }
+
+    #[test]
+    fn load_collected_dir_missing_dir_errors() {
+        let err = load_collected_dir(Path::new("/nonexistent/dir")).unwrap_err();
+        assert!(matches!(err, ReportError::DirNotFound(_)));
+    }
+
+    #[test]
+    fn load_collected_dir_without_day_files_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("index.md"), "只有索引\n").unwrap();
+        let err = load_collected_dir(tmp.path()).unwrap_err();
+        assert!(matches!(err, ReportError::EmptyDir(_)));
     }
 }

@@ -86,6 +86,9 @@ pub struct CommonArgs {
     /// 只采集指定 agent（逗号分隔：codex,cursor,claude,gemini）
     #[arg(long, value_delimiter = ',')]
     pub agents: Option<Vec<String>>,
+    /// Gemini/antigravity：同时纳入 history.jsonl（prompt 列表）
+    #[arg(long)]
+    pub include_prompt_history: bool,
 }
 
 #[derive(Debug, Default, Args)]
@@ -117,9 +120,6 @@ pub struct BackendArgs {
     /// 外部 CLI 超时秒数（默认 600）
     #[arg(long)]
     pub timeout_secs: Option<u64>,
-    /// Gemini/antigravity：同时纳入 history.jsonl（prompt 列表）
-    #[arg(long)]
-    pub include_prompt_history: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -146,6 +146,7 @@ pub struct EffectiveCommon {
     pub out_dir: PathBuf,
     pub home: PathBuf,
     pub agents: Option<Vec<AgentKind>>,
+    pub include_prompt_history: bool,
 }
 
 #[derive(Debug)]
@@ -159,7 +160,6 @@ pub struct EffectiveBackend {
     pub api_key_env: String,
     pub api_model: String,
     pub timeout_secs: u64,
-    pub include_prompt_history: bool,
 }
 
 /// 合并采集侧选项。`today`/`default_home` 由调用方注入以便测试。
@@ -199,6 +199,8 @@ pub fn resolve_common(
         out_dir,
         home,
         agents,
+        include_prompt_history: common.include_prompt_history
+            || config.include_prompt_history.unwrap_or(false),
     })
 }
 
@@ -243,8 +245,6 @@ pub fn resolve_backend(args: &BackendArgs, config: &Config) -> Result<EffectiveB
             .timeout_secs
             .or(config.timeout_secs)
             .unwrap_or(600),
-        include_prompt_history: args.include_prompt_history
-            || config.include_prompt_history.unwrap_or(false),
     })
 }
 
@@ -479,7 +479,6 @@ mod tests {
         assert_eq!(eff.api_key_env, "OPENAI_API_KEY");
         assert_eq!(eff.api_model, "gpt-4o-mini");
         assert!(!eff.stdout);
-        assert!(!eff.include_prompt_history);
     }
 
     #[test]
@@ -534,19 +533,27 @@ mod tests {
     }
 
     #[test]
-    fn resolve_backend_include_prompt_history_flag_or_config() {
+    fn resolve_common_include_prompt_history_flag_or_config() {
         let config = Config {
             include_prompt_history: Some(true),
             ..Default::default()
         };
-        let eff = resolve_backend(&BackendArgs::default(), &config).unwrap();
+        let eff = resolve_common(&CommonArgs::default(), &config, today(), &fake_home()).unwrap();
         assert!(eff.include_prompt_history);
-        let args = BackendArgs {
+        let common = CommonArgs {
             include_prompt_history: true,
             ..Default::default()
         };
-        let eff = resolve_backend(&args, &Config::default()).unwrap();
+        let eff = resolve_common(&common, &Config::default(), today(), &fake_home()).unwrap();
         assert!(eff.include_prompt_history);
+        let eff = resolve_common(
+            &CommonArgs::default(),
+            &Config::default(),
+            today(),
+            &fake_home(),
+        )
+        .unwrap();
+        assert!(!eff.include_prompt_history);
     }
 
     #[test]
