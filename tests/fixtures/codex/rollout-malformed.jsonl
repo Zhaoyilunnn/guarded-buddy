@@ -1,0 +1,4 @@
+{"timestamp":"2026-07-16T09:00:00.000Z","type":"session_meta","payload":{"session_id":"9d1e44aa-2222-4222-8222-abcdefabcdef","timestamp":"2026-07-16T08:59:59.000Z","cwd":"/home/zhaoyilun/shop-api","git":{"branch":"main"}}}
+{"timestamp":"2026-07-16T09:00:01.000Z","type":"event_msg","payload":{"type":"user_message","message":"第一问","images":[],"local_images":[],"text_elements":[]}}
+{这不是合法 JSON 的一行
+{"timestamp":"2026-07-16T09:01:00.000Z","type":"event_msg","payload":{"type":"agent_message","message":"第一答","phase":"final","memory_citation":null}}

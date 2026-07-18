@@ -1,0 +1,11 @@
+/target
+
+# Python venv artifacts (pre-existing in this directory)
+pyvenv.cfg
+bin/
+lib/
+lib64
+CACHEDIR.TAG
+
+# Tool output
+/out
