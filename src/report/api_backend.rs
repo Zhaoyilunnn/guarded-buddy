@@ -1,6 +1,8 @@
 //! OpenAI-compatible API backend: POST {base_url}/chat/completions.
 //! `HttpClient` trait is the test seam (DIP): unit tests use mocks, no mock crate required.
 
+use std::time::Duration;
+
 use super::{Prompt, ReportError, Summarizer};
 use crate::secrets::redact_secrets;
 
@@ -21,21 +23,32 @@ pub trait HttpClient {
 }
 
 /// Production implementation: reqwest blocking + rustls.
+///
+/// Large non-streaming completions often hit CDN first-byte timeouts (~20s with an
+/// empty chunked body). The API backend therefore requests `stream: true` and
+/// reassembles SSE deltas. Missing TLS `close_notify` is handled by recovering
+/// already-buffered SSE/JSON when possible.
 pub struct ReqwestClient {
     inner: reqwest::blocking::Client,
+    timeout: Duration,
 }
 
 impl ReqwestClient {
-    pub fn new() -> Self {
-        Self {
-            inner: reqwest::blocking::Client::new(),
-        }
-    }
-}
-
-impl Default for ReqwestClient {
-    fn default() -> Self {
-        Self::new()
+    /// Build a client whose request timeout matches the report backend timeout.
+    ///
+    /// Important: reqwest's blocking `Client::new()` defaults to **30s**. LLM
+    /// completions often exceed that; the body-read timeout is then surfaced as
+    /// the cryptic "error decoding response body".
+    pub fn with_timeout(timeout: Duration) -> Self {
+        let inner = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            // Prefer HTTP/1.1 for long LLM responses; HTTP/2 stream resets are a
+            // common source of non-timeout "error decoding response body".
+            .http1_only()
+            .tcp_nodelay(true)
+            .build()
+            .expect("reqwest client");
+        Self { inner, timeout }
     }
 }
 
@@ -46,16 +59,171 @@ impl HttpClient for ReqwestClient {
         bearer: &str,
         body: &serde_json::Value,
     ) -> Result<HttpResponse, ReportError> {
-        let resp = self
+        let start = std::time::Instant::now();
+        let mut resp = self
             .inner
             .post(url)
             .bearer_auth(bearer)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
             .json(body)
             .send()
-            .map_err(|e| ReportError::Http(e.to_string()))?;
+            .map_err(|e| {
+                map_reqwest_error(e, self.timeout, "send", start.elapsed(), None, None)
+            })?;
         let status = resp.status().as_u16();
-        let body = resp.text().map_err(|e| ReportError::Http(e.to_string()))?;
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let content_encoding = resp
+            .headers()
+            .get(reqwest::header::CONTENT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+
+        // Stream the body. Non-streaming completions for large prompts often sit
+        // ~20s with zero bytes then the CDN closes ("unexpected EOF during chunk
+        // size line"). Streaming sends tokens as they are generated.
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 16 * 1024];
+        let mut read_err: Option<std::io::Error> = None;
+        loop {
+            match std::io::Read::read(&mut resp, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => raw.extend_from_slice(&buf[..n]),
+                Err(e) => {
+                    read_err = Some(e);
+                    break;
+                }
+            }
+        }
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let wants_sse = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false)
+            || content_type
+                .as_deref()
+                .is_some_and(|ct| ct.contains("text/event-stream"))
+            || text.starts_with("data:");
+        if let Some(e) = read_err {
+            let chain = io_error_chain(&e);
+            let sse_content = wants_sse.then(|| assemble_sse_content(&text)).flatten();
+            let recoverable_json = raw_is_complete_json(&raw);
+            let recoverable_sse = sse_content.as_ref().is_some_and(|c| !c.is_empty());
+            if recoverable_sse {
+                return Ok(HttpResponse {
+                    status,
+                    body: wrap_assistant_json(sse_content.unwrap()),
+                });
+            }
+            if !recoverable_json {
+                return Err(ReportError::Http(format!(
+                    "API request failed at stage `body` after {}s (status={status}, encoding={content_encoding:?}, buffered={} bytes): {e} | causes: {}",
+                    start.elapsed().as_secs(),
+                    raw.len(),
+                    chain.join(" -> ")
+                )));
+            }
+        }
+        let body = if wants_sse {
+            match assemble_sse_content(&text) {
+                Some(content) if !content.is_empty() => wrap_assistant_json(content),
+                _ => text,
+            }
+        } else {
+            text
+        };
         Ok(HttpResponse { status, body })
+    }
+}
+
+fn wrap_assistant_json(content: String) -> String {
+    serde_json::json!({
+        "choices": [{ "message": { "role": "assistant", "content": content } }]
+    })
+    .to_string()
+}
+
+/// Assemble assistant text from an OpenAI-compatible SSE stream body.
+fn assemble_sse_content(sse: &str) -> Option<String> {
+    let mut content = String::new();
+    let mut saw_data = false;
+    for line in sse.lines() {
+        let line = line.trim();
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        saw_data = true;
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        if let Some(piece) = v
+            .pointer("/choices/0/delta/content")
+            .and_then(|c| c.as_str())
+        {
+            content.push_str(piece);
+        } else if let Some(piece) = v
+            .pointer("/choices/0/message/content")
+            .and_then(|c| c.as_str())
+        {
+            // some gateways emit full message chunks
+            content.push_str(piece);
+        }
+    }
+    if saw_data { Some(content) } else { None }
+}
+
+fn raw_is_complete_json(raw: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(raw).is_ok()
+}
+
+fn io_error_chain(err: &std::io::Error) -> Vec<String> {
+    use std::error::Error as _;
+    let mut out = vec![err.to_string()];
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = err.source();
+    while let Some(e) = cur {
+        out.push(e.to_string());
+        cur = e.source();
+    }
+    out
+}
+
+fn error_chain(e: &reqwest::Error) -> Vec<String> {
+    use std::error::Error as _;
+    let mut out = vec![e.to_string()];
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = e.source();
+    while let Some(err) = cur {
+        out.push(err.to_string());
+        cur = err.source();
+    }
+    out
+}
+
+fn map_reqwest_error(
+    e: reqwest::Error,
+    timeout: Duration,
+    stage: &str,
+    elapsed: Duration,
+    status: Option<u16>,
+    content_encoding: Option<&str>,
+) -> ReportError {
+    let chain = error_chain(&e);
+    if e.is_timeout() {
+        ReportError::Http(format!(
+            "API request timed out after {}s at stage `{stage}` (elapsed {}s; increase --timeout-secs): {e}",
+            timeout.as_secs(),
+            elapsed.as_secs()
+        ))
+    } else {
+        ReportError::Http(format!(
+            "API request failed at stage `{stage}` after {}s (status={status:?}, encoding={content_encoding:?}): {e} | causes: {}",
+            elapsed.as_secs(),
+            chain.join(" -> ")
+        ))
     }
 }
 
@@ -89,6 +257,9 @@ impl<C: HttpClient> Summarizer for ApiSummarizer<C> {
         let body = serde_json::json!({
             "model": self.model,
             "messages": [{"role": "user", "content": safe_prompt}],
+            // Streaming keeps the connection alive with first tokens; non-stream
+            // large prompts often hit CDN first-byte timeouts (~20s empty body).
+            "stream": true,
         });
         let resp = self.client.post_json(&url, &key, &body)?;
         if !(200..300).contains(&resp.status) {
@@ -115,7 +286,7 @@ impl<C: HttpClient> Summarizer for ApiSummarizer<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiSummarizer, HttpClient, HttpResponse};
+    use super::{ApiSummarizer, HttpClient, HttpResponse, assemble_sse_content};
     use crate::report::{Prompt, ReportError, Summarizer};
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -218,6 +389,22 @@ mod tests {
         assert_eq!(body["model"], "deepseek-chat");
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "日报全文 prompt");
+        assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn assemble_sse_content_joins_delta_chunks() {
+        let sse = "\
+data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n\
+data: {\"choices\":[{\"delta\":{\"content\":\"周\"}}]}\n\n\
+data: {\"choices\":[{\"delta\":{\"content\":\"报\"}}]}\n\n\
+data: [DONE]\n\n";
+        assert_eq!(assemble_sse_content(sse).as_deref(), Some("周报"));
+    }
+
+    #[test]
+    fn assemble_sse_content_returns_none_for_plain_json() {
+        assert!(assemble_sse_content(r#"{"choices":[]}"#).is_none());
     }
 
     #[test]

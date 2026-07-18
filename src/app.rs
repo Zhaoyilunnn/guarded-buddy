@@ -69,7 +69,7 @@ pub fn summarize_range_dir(
             CliSummarizer::new(spec, Duration::from_secs(backend.timeout_secs)).summarize(&prompt)
         }
         BackendKind::Api => ApiSummarizer::new(
-            ReqwestClient::new(),
+            ReqwestClient::with_timeout(Duration::from_secs(backend.timeout_secs)),
             backend.api_base_url.clone(),
             backend.api_key_env.clone(),
             backend.api_model.clone(),

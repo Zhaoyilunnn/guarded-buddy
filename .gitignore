@@ -21,3 +21,4 @@ credentials.json
 
 # Local IDE / agent settings (machine-specific paths)
 .claude/settings.local.json
+.cursor

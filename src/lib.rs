@@ -5,6 +5,8 @@ pub mod cli;
 pub mod collect;
 pub mod config;
 pub mod domain;
+pub mod job;
+pub mod mail;
 pub mod render;
 pub mod report;
 pub mod secrets;

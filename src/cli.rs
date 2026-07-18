@@ -105,9 +105,6 @@ pub struct BackendArgs {
     /// Weekly report template file
     #[arg(long)]
     pub template: Option<PathBuf>,
-    /// Write report to stdout instead of a file
-    #[arg(long)]
-    pub stdout: bool,
     /// API backend base URL (default https://api.openai.com/v1)
     #[arg(long)]
     pub base_url: Option<String>,
@@ -120,6 +117,12 @@ pub struct BackendArgs {
     /// External CLI timeout in seconds (default 600)
     #[arg(long)]
     pub timeout_secs: Option<u64>,
+    /// Email recipients for the finished report (comma-separated); overrides config
+    #[arg(long, value_delimiter = ',')]
+    pub mail_to: Option<Vec<String>>,
+    /// Internal: run summarization in-process (used by the detached worker)
+    #[arg(long, hide = true)]
+    pub worker: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -155,11 +158,14 @@ pub struct EffectiveBackend {
     pub cli_name: String,
     pub cli_cmd: Option<String>,
     pub template: Option<PathBuf>,
-    pub stdout: bool,
     pub api_base_url: String,
     pub api_key_env: String,
     pub api_model: String,
     pub timeout_secs: u64,
+    /// Recipients for mutt email after report completes; empty = skip mail.
+    pub mail_to: Vec<String>,
+    /// When true, run summarization in this process (worker mode).
+    pub worker: bool,
 }
 
 /// Merge collect-side options. `today`/`default_home` are injected by callers for testing.
@@ -225,7 +231,6 @@ pub fn resolve_backend(args: &BackendArgs, config: &Config) -> Result<EffectiveB
             .unwrap_or_else(|| "claude".to_string()),
         cli_cmd: args.cmd.clone().or_else(|| config.cli_cmd.clone()),
         template: args.template.clone().or_else(|| config.template.clone()),
-        stdout: args.stdout,
         api_base_url: args
             .base_url
             .clone()
@@ -245,6 +250,12 @@ pub fn resolve_backend(args: &BackendArgs, config: &Config) -> Result<EffectiveB
             .timeout_secs
             .or(config.timeout_secs)
             .unwrap_or(600),
+        mail_to: args
+            .mail_to
+            .clone()
+            .or_else(|| config.mail_to.clone())
+            .unwrap_or_default(),
+        worker: args.worker,
     })
 }
 
@@ -312,7 +323,8 @@ mod tests {
             "api",
             "--model",
             "deepseek-chat",
-            "--stdout",
+            "--mail-to",
+            "a@example.com,b@example.com",
         ])
         .unwrap();
         let Command::Run(args) = cli.command else {
@@ -321,7 +333,27 @@ mod tests {
         assert_eq!(args.common.range.days, Some(14));
         assert_eq!(args.backend.backend.as_deref(), Some("api"));
         assert_eq!(args.backend.model.as_deref(), Some("deepseek-chat"));
-        assert!(args.backend.stdout);
+        assert_eq!(
+            args.backend.mail_to.as_deref(),
+            Some(["a@example.com".to_string(), "b@example.com".to_string()].as_slice())
+        );
+        assert!(!args.backend.worker);
+    }
+
+    #[test]
+    fn parses_hidden_worker_flag() {
+        let cli = Cli::try_parse_from([
+            "ai-weekly-report",
+            "report",
+            "--worker",
+            "--days",
+            "7",
+        ])
+        .unwrap();
+        let Command::Report(args) = cli.command else {
+            panic!("expected report")
+        };
+        assert!(args.backend.worker);
     }
 
     // ---------- resolve_common ----------
@@ -478,7 +510,24 @@ mod tests {
         assert_eq!(eff.api_base_url, "https://api.openai.com/v1");
         assert_eq!(eff.api_key_env, "OPENAI_API_KEY");
         assert_eq!(eff.api_model, "gpt-4o-mini");
-        assert!(!eff.stdout);
+        assert!(eff.mail_to.is_empty());
+        assert!(!eff.worker);
+    }
+
+    #[test]
+    fn resolve_mail_to_flag_over_config() {
+        let config = Config {
+            mail_to: Some(vec!["cfg@example.com".to_string()]),
+            ..Default::default()
+        };
+        let eff = resolve_backend(&BackendArgs::default(), &config).unwrap();
+        assert_eq!(eff.mail_to, vec!["cfg@example.com".to_string()]);
+        let args = BackendArgs {
+            mail_to: Some(vec!["cli@example.com".to_string()]),
+            ..Default::default()
+        };
+        let eff = resolve_backend(&args, &config).unwrap();
+        assert_eq!(eff.mail_to, vec!["cli@example.com".to_string()]);
     }
 
     #[test]

@@ -27,6 +27,8 @@ pub struct Config {
     pub template: Option<PathBuf>,
     /// Gemini/antigravity: whether to include history.jsonl.
     pub include_prompt_history: Option<bool>,
+    /// Email recipients for finished reports (mutt). Empty/absent = do not send.
+    pub mail_to: Option<Vec<String>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -100,6 +102,7 @@ api_key_env = "DEEPSEEK_API_KEY"
 api_model = "deepseek-chat"
 template = "/home/me/weekly-template.md"
 include_prompt_history = true
+mail_to = ["a@example.com", "b@example.com"]
 "#,
         )
         .unwrap();
@@ -118,6 +121,10 @@ include_prompt_history = true
             Some(std::path::Path::new("/home/me/weekly-template.md"))
         );
         assert_eq!(config.include_prompt_history, Some(true));
+        assert_eq!(
+            config.mail_to.as_deref(),
+            Some(["a@example.com".to_string(), "b@example.com".to_string()].as_slice())
+        );
     }
 
     #[test]

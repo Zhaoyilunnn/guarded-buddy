@@ -5,10 +5,10 @@ Generate weekly AI coding-assistant conversation reports in one command. Reads l
 ## Features
 
 - **collect**: Scans `$HOME` for data directories `.codex`, `.cursor`, `.claude`, and `.gemini`, groups by local date, writes one Markdown file per day under `out/<start>_<end>/` (e.g. `2026-07-15.md`) plus an `index.md` index; idempotent (re-runs overwrite same filenames)
-- **report**: Generates a weekly report from a collected directory, with two backends:
+- **report** / **run**: Collect (run only) then **schedule summarization in the background**. The foreground process exits immediately after spawning a detached worker that writes `out/<range>/report.md` (progress in `report.log`). Two backends:
   - **CLI**: Invokes locally installed `codex` / `claude` / `agy` / `gemini` (non-interactive; prompt via stdin or args; working directory set to the records directory so the tool reads files itself)
-  - **API**: Built-in OpenAI-compatible client (`POST {base_url}/chat/completions`), embeds full text (200KB budget), reads API key from environment variables
-- **run** = collect + report in one step
+  - **API**: Built-in OpenAI-compatible client (`POST {base_url}/chat/completions`), embeds full text (budgeted), reads API key from environment variables
+- Optional **email** via `mutt` after a successful `report.md` (`mail_to` / `--mail-to`)
 - Custom report template (`--template`) with placeholders `{{start_date}}` `{{end_date}}` `{{stats}}` `{{daily_notes}}`
 
 ## Install
@@ -21,14 +21,16 @@ cargo install --path .
 ## Usage
 
 ```sh
-# One-shot: collect last 7 days + generate report with claude CLI (writes out/<range>/report.md)
+# One-shot: collect last 7 days, then summarize in the background
 ai-weekly-report run
+# → Summarization started in background (pid …) → out/<range>/report.md (log: …/report.log)
+# Tail progress:  tail -f out/<range>/report.log
 
 # Collect only, with explicit date range
 ai-weekly-report collect --from 2026-07-12 --to 2026-07-18
 
-# Summarize only (no re-collect), print to terminal
-ai-weekly-report report --days 7 --stdout
+# Summarize only (no re-collect); also background by default
+ai-weekly-report report --days 7
 
 # Switch backend: codex CLI
 ai-weekly-report run --cli-name codex
@@ -41,7 +43,11 @@ export DEEPSEEK_API_KEY=sk-...
 ai-weekly-report run --backend api \
   --base-url https://api.deepseek.com/v1 \
   --api-key-env DEEPSEEK_API_KEY \
-  --model deepseek-chat
+  --model deepseek-chat \
+  --timeout-secs 600
+
+# Email the finished report with mutt (requires mutt installed + configured)
+ai-weekly-report run --mail-to you@example.com,team@example.com
 
 # Custom template / filter agents / include agy prompt history
 ai-weekly-report run --template my-template.md --agents codex,claude
@@ -66,7 +72,10 @@ api_key_env = "OPENAI_API_KEY"   # env var *name* only — never put the raw key
 api_model = "gpt-4o-mini"
 # template = "/path/to/template.md"
 # include_prompt_history = false
+# mail_to = ["you@example.com", "team@example.com"]
 ```
+
+Email is skipped when `mail_to` / `--mail-to` is empty. If recipients are set but `mutt` is missing, the tool prints a one-line hint and still writes `report.md`.
 
 ## Security
 
@@ -101,6 +110,8 @@ src/
   report/        // trait Summarizer
     cli_backend.rs  // preset table + custom --cmd + wait-timeout
     api_backend.rs  // OpenAI-compatible, HttpClient trait as test seam
+  mail.rs        // mutt probe + send
+  job.rs         // detached --worker re-exec for async report
   cli.rs / config.rs // clap + TOML, flag > config > default
   app.rs / main.rs   // thin orchestration + thin entry point
 ```

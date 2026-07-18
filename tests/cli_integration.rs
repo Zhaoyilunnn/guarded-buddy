@@ -3,7 +3,8 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const CLAUDE_SAMPLE: &str = include_str!("fixtures/claude/session-sample.jsonl");
 const CURSOR_SAMPLE: &str = include_str!("fixtures/cursor/transcript-sample.jsonl");
@@ -77,6 +78,22 @@ fn base_cmd() -> Command {
     cmd
 }
 
+fn wait_for_file(path: &Path, timeout: Duration) -> String {
+    let start = Instant::now();
+    loop {
+        if path.exists()
+            && let Ok(content) = std::fs::read_to_string(path)
+            && !content.is_empty()
+        {
+            return content;
+        }
+        if start.elapsed() > timeout {
+            panic!("timed out waiting for {}", path.display());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn collect_end_to_end_with_day_boundary() {
     let home = fake_home();
@@ -120,7 +137,7 @@ fn collect_end_to_end_with_day_boundary() {
 }
 
 #[test]
-fn run_with_fake_cli_backend_writes_report_md() {
+fn run_schedules_background_and_worker_writes_report() {
     let home = fake_home();
     let out = tempfile::tempdir().unwrap();
     let (_t, script) = fake_backend_script();
@@ -139,13 +156,17 @@ fn run_with_fake_cli_backend_writes_report_md() {
             script.to_str().unwrap(),
         ])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("Summarization started in background"));
 
     let dir = out.path().join("2026-07-12_2026-07-18");
-    let report = std::fs::read_to_string(dir.join("report.md")).unwrap();
+    assert!(dir.join("report.pid").exists());
+    assert!(dir.join("report.log").exists());
+
+    let report = wait_for_file(&dir.join("report.md"), Duration::from_secs(10));
     assert!(report.contains("假周报"));
     // prompt via stdin in FilesManifest mode (lists filenames, does not inline bodies)
-    let captured = std::fs::read_to_string(dir.join("stdin-capture.txt")).unwrap();
+    let captured = wait_for_file(&dir.join("stdin-capture.txt"), Duration::from_secs(5));
     assert!(captured.contains("2026-07-14.md"));
     assert!(captured.contains("输入文件"));
     assert!(!captured.contains("跨日边界的提问"), "manifest mode must not inline message bodies");
@@ -153,29 +174,29 @@ fn run_with_fake_cli_backend_writes_report_md() {
 }
 
 #[test]
-fn run_with_stdout_prints_report_without_writing_file() {
+fn report_worker_writes_report_md_synchronously() {
     let home = fake_home();
     let out = tempfile::tempdir().unwrap();
+    let range_args = [
+        "--from",
+        "2026-07-12",
+        "--to",
+        "2026-07-18",
+        "--home",
+        home.path().to_str().unwrap(),
+        "--out",
+        out.path().to_str().unwrap(),
+    ];
+    base_cmd().args(["collect"]).args(range_args).assert().success();
     let (_t, script) = fake_backend_script();
     base_cmd()
-        .args([
-            "run",
-            "--from",
-            "2026-07-12",
-            "--to",
-            "2026-07-18",
-            "--home",
-            home.path().to_str().unwrap(),
-            "--out",
-            out.path().to_str().unwrap(),
-            "--cmd",
-            script.to_str().unwrap(),
-            "--stdout",
-        ])
+        .args(["report", "--worker"])
+        .args(range_args)
+        .args(["--cmd", script.to_str().unwrap()])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("假周报"));
-    assert!(!out.path().join("2026-07-12_2026-07-18/report.md").exists());
+        .success();
+    let report = std::fs::read_to_string(out.path().join("2026-07-12_2026-07-18/report.md")).unwrap();
+    assert!(report.contains("假周报"));
 }
 
 #[test]
@@ -198,6 +219,7 @@ fn run_api_backend_without_key_exits_1() {
             "--api-key-env",
             "AIW_IT_DEFINITELY_MISSING_KEY",
         ])
+        .env_remove("AIW_IT_DEFINITELY_MISSING_KEY")
         .assert()
         .failure()
         .code(1)
@@ -229,7 +251,7 @@ fn report_on_uncollected_dir_fails_cleanly() {
 }
 
 #[test]
-fn report_subcommand_reads_existing_dir() {
+fn report_subcommand_schedules_background() {
     // collect first, then report (no re-collect)
     let home = fake_home();
     let out = tempfile::tempdir().unwrap();
@@ -250,8 +272,11 @@ fn report_subcommand_reads_existing_dir() {
         .args(range_args)
         .args(["--cmd", script.to_str().unwrap()])
         .assert()
-        .success();
-    let report = std::fs::read_to_string(out.path().join("2026-07-12_2026-07-18/report.md")).unwrap();
+        .success()
+        .stdout(predicate::str::contains("Summarization started in background"));
+    let dir: PathBuf = out.path().join("2026-07-12_2026-07-18");
+    assert!(dir.join("report.pid").exists());
+    let report = wait_for_file(&dir.join("report.md"), Duration::from_secs(10));
     assert!(report.contains("假周报"));
 }
 

@@ -62,6 +62,17 @@ impl CliSummarizer {
     }
 }
 
+/// Build the detail string for a failed CLI run.
+/// Claude Code (and some other CLIs) print API/auth errors to stdout while leaving stderr empty.
+fn cli_failure_detail(stdout: &str, stderr: &str) -> String {
+    match (stderr.trim().is_empty(), stdout.trim().is_empty()) {
+        (false, false) => format!("{}\n--- stdout ---\n{}", stderr.trim_end(), stdout.trim_end()),
+        (false, true) => stderr.to_string(),
+        (true, false) => stdout.to_string(),
+        (true, true) => "(no stdout/stderr captured)".to_string(),
+    }
+}
+
 impl Summarizer for CliSummarizer {
     fn summarize(&self, prompt: &Prompt) -> Result<String, ReportError> {
         let mut cmd = Command::new(&self.spec.program);
@@ -82,6 +93,8 @@ impl Summarizer for CliSummarizer {
         {
             // child may exit early and cause write to fail; ignore (exit code/timeout will report)
             let _ = stdin.write_all(prompt.text.as_bytes());
+            let _ = stdin.flush();
+            drop(stdin); // close pipe so the child sees EOF
         }
         // spawn reader threads for stdout/stderr to avoid pipe buffer deadlock
         let mut out_thread = child.stdout.take().map(|mut pipe| {
@@ -101,15 +114,21 @@ impl Summarizer for CliSummarizer {
 
         match child.wait_timeout(self.timeout) {
             Ok(Some(status)) => {
-                let stdout = out_thread.take().map(|h| h.join().unwrap_or_default());
-                let stderr = err_thread.take().map(|h| h.join().unwrap_or_default());
+                let stdout_s = out_thread
+                    .take()
+                    .map(|h| h.join().unwrap_or_default())
+                    .unwrap_or_default();
+                let stderr_s = err_thread
+                    .take()
+                    .map(|h| h.join().unwrap_or_default())
+                    .unwrap_or_default();
                 if status.success() {
-                    Ok(stdout.unwrap_or_default())
+                    Ok(stdout_s)
                 } else {
                     Err(ReportError::CliFailed {
                         cmd: self.spec.program.clone(),
                         code: status.code(),
-                        stderr: redact_secrets(&stderr.unwrap_or_default()),
+                        stderr: redact_secrets(&cli_failure_detail(&stdout_s, &stderr_s)),
                     })
                 }
             }
@@ -131,7 +150,7 @@ impl Summarizer for CliSummarizer {
 
 #[cfg(test)]
 mod tests {
-    use super::{CliSummarizer, parse_custom_cmd, preset};
+    use super::{CliSummarizer, cli_failure_detail, parse_custom_cmd, preset};
     use crate::report::{Prompt, ReportError, Summarizer};
     use std::path::PathBuf;
     use std::time::Duration;
@@ -247,6 +266,38 @@ mod tests {
             }
             other => panic!("expected CliFailed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn nonzero_exit_surfaces_stdout_when_stderr_empty() {
+        // Claude Code prints API/auth errors to stdout and leaves stderr empty.
+        let (_t, path) = fake_script("echo 'API Error: Request rejected (429)'; exit 1");
+        let spec = parse_custom_cmd(path.to_str().unwrap()).unwrap();
+        let summarizer = CliSummarizer::new(spec, Duration::from_secs(5));
+        let err = summarizer.summarize(&prompt("x")).unwrap_err();
+        match err {
+            ReportError::CliFailed { code, stderr, .. } => {
+                assert_eq!(code, Some(1));
+                assert!(
+                    stderr.contains("API Error: Request rejected (429)"),
+                    "should surface stdout: {stderr}"
+                );
+            }
+            other => panic!("expected CliFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_failure_detail_combines_both_streams() {
+        assert_eq!(
+            cli_failure_detail("out-msg", ""),
+            "out-msg"
+        );
+        assert_eq!(cli_failure_detail("", "err-msg"), "err-msg");
+        let both = cli_failure_detail("out-msg", "err-msg");
+        assert!(both.contains("err-msg"));
+        assert!(both.contains("out-msg"));
+        assert!(both.contains("--- stdout ---"));
     }
 
     #[test]

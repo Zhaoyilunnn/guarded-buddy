@@ -64,7 +64,9 @@ pub trait Summarizer {
 }
 
 /// Total character budget for inlined full text in Inline mode (200KB).
-pub const INLINE_BUDGET: usize = 200 * 1024;
+/// Inline mode total character budget for embedded daily notes (~48KB).
+/// Kept modest so API backends start streaming before CDN first-byte timeouts.
+pub const INLINE_BUDGET: usize = 48 * 1024;
 
 /// Assemble a prompt. `files` is (filename, content) pairs (usually daily files excluding index).
 pub fn assemble_prompt(
@@ -300,8 +302,8 @@ mod tests {
 
     #[test]
     fn inline_mode_truncates_proportionally_over_budget() {
-        // 3 files at 100KB each, 200KB total budget → ~66KB each; full prompt must stay under budget
-        let big = "字".repeat(100 * 1024);
+        // 3 files at 40KB each, 48KB total budget → truncated; full prompt must stay near budget
+        let big = "字".repeat(40 * 1024);
         let files: Vec<(String, String)> = (0..3)
             .map(|i| (format!("f{i}.md"), big.clone()))
             .collect();
