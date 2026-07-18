@@ -5,5 +5,6 @@ pub mod collect;
 pub mod config;
 pub mod domain;
 pub mod render;
+pub mod report;
 pub mod sources;
 pub mod template;
