@@ -1,14 +1,59 @@
 //! 采集编排：从所有数据源收集会话 → 按本地日分桶（跨午夜拆分）→
 //! 写 `<out>/<range>/<date>.md` 与 `index.md`（幂等覆盖）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use chrono::NaiveDate;
 
-use crate::domain::{DateRange, Message, Session};
+use crate::domain::{AgentKind, DateRange, Message, MessageContent, Role, Session};
 use crate::render::daily::{render_daily, render_index};
 use crate::sources::{HistorySource, SourceError};
+
+/// 合并同一 (agent, id, project) 的重复会话：codex resume 会产生多个
+/// rollout 文件、消息互相重叠。消息按 (时间戳, 角色, 内容) 去重并按时间排序。
+pub fn merge_sessions(sessions: Vec<Session>) -> Vec<Session> {
+    type Key = (AgentKind, String, String);
+    type MessageKey = (i64, Role, String);
+    let mut map: BTreeMap<Key, (Session, HashSet<MessageKey>)> = BTreeMap::new();
+    for session in sessions {
+        let key = (
+            session.agent,
+            session.id.clone(),
+            session.project.clone(),
+        );
+        let (merged, seen) = map.entry(key).or_insert_with(|| {
+            (
+                Session {
+                    agent: session.agent,
+                    project: session.project.clone(),
+                    id: session.id.clone(),
+                    started_at: session.started_at,
+                    messages: Vec::new(),
+                },
+                HashSet::new(),
+            )
+        });
+        for m in session.messages {
+            let content_key = match &m.content {
+                MessageContent::Text(t) => format!("T:{t}"),
+                MessageContent::ToolUse { name, summary } => format!("U:{name}:{summary}"),
+            };
+            if seen.insert((m.timestamp.timestamp_millis(), m.role, content_key)) {
+                merged.messages.push(m);
+            }
+        }
+    }
+    map.into_values()
+        .map(|(mut s, _)| {
+            s.messages.sort_by_key(|m| m.timestamp);
+            if let Some(first) = s.messages.first() {
+                s.started_at = first.timestamp;
+            }
+            s
+        })
+        .collect()
+}
 
 /// 一天的桶：当日有消息的会话（每条 session 只含当日消息）。
 #[derive(Debug)]
@@ -73,7 +118,7 @@ pub fn collect(
     for source in sources {
         all.extend(source.collect(range, &mut warnings));
     }
-    let buckets = group_by_day(all, range);
+    let buckets = group_by_day(merge_sessions(all), range);
 
     let dir = out_root.join(range.dir_name());
     std::fs::create_dir_all(&dir)?;
@@ -96,7 +141,7 @@ pub fn collect(
 
 #[cfg(test)]
 mod tests {
-    use super::{CollectOutcome, collect, group_by_day};
+    use super::{CollectOutcome, collect, group_by_day, merge_sessions};
     use crate::domain::{AgentKind, DateRange, Message, MessageContent, Role, Session};
     use crate::sources::{HistorySource, SourceError};
     use chrono::{DateTime, Local, NaiveDate, TimeZone};
@@ -137,6 +182,44 @@ mod tests {
     }
 
     // ---------- group_by_day ----------
+
+    // ---------- merge_sessions ----------
+
+    #[test]
+    fn merge_sessions_dedups_resumed_rollouts() {
+        // codex resume：同一 session_id 出现在多个 rollout 文件中，消息重叠
+        let base = vec![
+            msg("2026-07-15", "08:53", "同一个问题"),
+            msg("2026-07-15", "08:54", "回答前半"),
+        ];
+        let resumed_extra = vec![
+            msg("2026-07-15", "08:53", "同一个问题"), // 重复
+            msg("2026-07-15", "08:54", "回答前半"),   // 重复
+            msg("2026-07-15", "09:05", "新的追问"),
+        ];
+        let s1 = session("same-id", base);
+        let s2 = session("same-id", resumed_extra);
+        let merged = merge_sessions(vec![s1, s2]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].messages.len(), 3);
+        assert_eq!(
+            merged[0].messages[2].text().unwrap(),
+            "新的追问"
+        );
+    }
+
+    #[test]
+    fn merge_sessions_keeps_distinct_ids_and_projects() {
+        let s1 = session("id-a", vec![msg("2026-07-15", "08:53", "hi")]);
+        let s2 = session("id-b", vec![msg("2026-07-15", "08:53", "hi")]);
+        assert_eq!(merge_sessions(vec![s1, s2]).len(), 2);
+        // 同 id 但不同 project（如 gemini prompt-history 按 workspace 分组）不合并
+        let mut s3 = session("prompt-history", vec![msg("2026-07-15", "09:00", "q1")]);
+        s3.project = "/ws/a".to_string();
+        let mut s4 = session("prompt-history", vec![msg("2026-07-15", "09:00", "q1")]);
+        s4.project = "/ws/b".to_string();
+        assert_eq!(merge_sessions(vec![s3, s4]).len(), 2);
+    }
 
     #[test]
     fn group_by_day_splits_session_spanning_midnight() {

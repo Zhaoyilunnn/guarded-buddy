@@ -157,8 +157,9 @@ pub struct DirSummary {
 }
 
 /// 读取 `out/<range>/` 下所有日文件并统计会话/消息数。
-/// 通过扫描我们自己渲染的 markdown 结构（`## Agent` 段、`### 会话` 头、
-/// `**👤/**🤖/**🔧` 消息行）计数。
+/// 统计锚定我们自己渲染的结构行——`## <Agent名>`（精确匹配）、
+/// `### 会话 \`<8位id|unknown>\` · `、`- 时间: … · N 条消息`，
+/// 以免正文里混入的 markdown 标题干扰计数。
 pub fn load_collected_dir(dir: &Path) -> Result<DirSummary, ReportError> {
     if !dir.is_dir() {
         return Err(ReportError::DirNotFound(dir.to_path_buf()));
@@ -180,22 +181,50 @@ pub fn load_collected_dir(dir: &Path) -> Result<DirSummary, ReportError> {
         let mut current_agent: Option<AgentKind> = None;
         for line in content.lines() {
             if let Some(heading) = line.strip_prefix("## ") {
-                current_agent = agent_from_heading(heading.trim());
-            } else if line.starts_with("### 会话") {
+                // 只有精确的 agent 名才切换段落；正文中的 `## xxx` 忽略
+                if let Some(kind) = agent_from_heading(heading.trim()) {
+                    current_agent = Some(kind);
+                }
+            } else if is_session_heading(line) {
                 if let Some(kind) = current_agent {
                     *per_agent.entry(kind).or_default() += 1;
                 }
-            } else if line.starts_with("**👤")
-                || line.starts_with("**🤖")
-                || line.starts_with("**🔧")
-            {
-                messages += 1;
+            } else if let Some(n) = parse_session_meta_count(line) {
+                messages += n;
             }
         }
         files.push((name, content));
     }
     let stats = format_stats(files.len(), &per_agent, messages);
     Ok(DirSummary { files, stats })
+}
+
+/// 匹配渲染出的会话标题：`### 会话 \`<id>\` · `。正文里的自然标题
+/// （如 `### 一、架构对比`）不会带反引号 id 段，不会误命中。
+fn is_session_heading(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("### 会话 `") else {
+        return false;
+    };
+    let Some(end) = rest.find('`') else {
+        return false;
+    };
+    end > 0 && rest[end + 1..].starts_with(" · ")
+}
+
+/// 解析会话元信息行 `- 时间: HH:MM – HH:MM · N 条消息` 中的 N。
+fn parse_session_meta_count(line: &str) -> Option<usize> {
+    let rest = line.strip_prefix("- 时间: ")?;
+    let count_part = rest.strip_suffix(" 条消息")?;
+    let n = count_part.rsplit(" · ").next()?;
+    // 时间部分必须形如 "HH:MM – HH:MM"（粗略校验，防正文撞行）
+    let time_part = count_part.strip_suffix(&format!(" · {n}"))?;
+    let mut halves = time_part.split(" – ");
+    let valid = matches!(
+        (halves.next(), halves.next(), halves.next()),
+        (Some(a), Some(b), None) if a.len() == 5 && b.len() == 5
+            && a.as_bytes()[2] == b':' && b.as_bytes()[2] == b':'
+    );
+    if valid { n.parse().ok() } else { None }
 }
 
 #[cfg(test)]
@@ -331,6 +360,34 @@ mod tests {
         assert_eq!(
             summary.stats,
             "有记录 2 天 · 会话 3 个（Codex × 2 · Claude Code × 1）· 消息 10 条"
+        );
+    }
+
+    #[test]
+    fn load_collected_dir_ignores_headings_inside_message_bodies() {
+        // 助手正文里的 markdown 标题（如 "## 综合分析"、"### 一、对比"）
+        // 不应干扰统计
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = session(AgentKind::Cursor, "c1", 0);
+        s.messages = vec![
+            Message {
+                role: Role::User,
+                timestamp: at("2026-07-15"),
+                content: MessageContent::Text("问题".to_string()),
+            },
+            Message {
+                role: Role::Assistant,
+                timestamp: at("2026-07-15"),
+                content: MessageContent::Text(
+                    "## 综合分析\n\n### 一、架构对比\n\n**👤 用户** `99:99`\n\n正文".to_string(),
+                ),
+            },
+        ];
+        write_day_file(tmp.path(), "2026-07-15.md", &[s]);
+        let summary = load_collected_dir(tmp.path()).unwrap();
+        assert_eq!(
+            summary.stats,
+            "有记录 1 天 · 会话 1 个（Cursor × 1）· 消息 2 条"
         );
     }
 
