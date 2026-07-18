@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Local};
 use walkdir::WalkDir;
 
-use super::{HistorySource, SourceError, cap_ingest};
+use super::{HistorySource, SourceError, cap_ingest, compact_json_input};
 use crate::domain::{AgentKind, DateRange, Message, MessageContent, Role, Session};
 
 pub struct ClaudeSource {
@@ -173,7 +173,7 @@ pub(crate) fn parse_session_lines<I: Iterator<Item = String>>(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown")
                                 .to_string();
-                            let summary = compact_json(block.get("input"));
+                            let summary = compact_json_input(block.get("input"));
                             messages.push(Message {
                                 role,
                                 timestamp: ts,
@@ -219,18 +219,7 @@ fn push_text(messages: &mut Vec<Message>, role: Role, ts: DateTime<Local>, text:
     });
 }
 
-/// 工具输入压缩为单行 JSON，限 120 字符。
-fn compact_json(value: Option<&serde_json::Value>) -> String {
-    let raw = value
-        .map(|v| serde_json::to_string(v).unwrap_or_default())
-        .unwrap_or_default();
-    let mut out: String = raw.chars().take(120).collect();
-    if raw.chars().count() > 120 {
-        out.push('…');
-    }
-    out
-}
-
+/// ISO8601/RFC3339（UTC）→ 本地时区。
 fn parse_iso(s: &str) -> Option<DateTime<Local>> {
     DateTime::parse_from_rfc3339(s)
         .ok()

@@ -68,6 +68,19 @@ pub(crate) fn cap_ingest(text: &str) -> String {
     format!("{cut}…[truncated at ingest]")
 }
 
+/// 工具输入压缩为单行 JSON，限 120 字符（超出加省略号）。
+pub(crate) fn compact_json_input(value: Option<&serde_json::Value>) -> String {
+    const MAX: usize = 120;
+    let raw = value
+        .map(|v| serde_json::to_string(v).unwrap_or_default())
+        .unwrap_or_default();
+    let mut out: String = raw.chars().take(MAX).collect();
+    if raw.chars().count() > MAX {
+        out.push('…');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +128,20 @@ mod tests {
         let out = cap_ingest(&long);
         assert!(out.ends_with("…[truncated at ingest]"));
         assert!(out.chars().count() > INGEST_CAP); // cap + marker
+    }
+
+    #[test]
+    fn compact_json_input_produces_single_line_capped_output() {
+        let v = serde_json::json!({"path": "/a/b.rs", "note": "line1\nline2"});
+        let out = compact_json_input(Some(&v));
+        assert!(!out.contains('\n'));
+        assert!(out.contains("/a/b.rs"));
+
+        let long = serde_json::json!({"data": "x".repeat(500)});
+        let out = compact_json_input(Some(&long));
+        assert!(out.chars().count() == 121);
+        assert!(out.ends_with('…'));
+
+        assert_eq!(compact_json_input(None), "");
     }
 }
