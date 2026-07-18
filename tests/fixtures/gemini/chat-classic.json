@@ -1,0 +1,35 @@
+{
+  "sessionId": "c3d4e5f6-1111-4222-8333-abcdefabcdef",
+  "projectHash": "abc123def456",
+  "startTime": "2026-07-14T02:00:00.000Z",
+  "lastUpdated": "2026-07-14T02:05:05.000Z",
+  "messages": [
+    {
+      "id": "m1",
+      "timestamp": "2026-07-14T02:00:00.000Z",
+      "type": "user",
+      "content": [{"text": "帮我查一下这个项目的 license"}]
+    },
+    {
+      "id": "m2",
+      "timestamp": "2026-07-14T02:00:20.000Z",
+      "type": "gemini",
+      "content": [{"text": "项目使用 MIT license，我先确认一下文件。"}],
+      "toolCalls": [
+        {"name": "read_file", "args": {"absolute_path": "/home/zhaoyilun/xq/LICENSE"}}
+      ]
+    },
+    {
+      "id": "m3",
+      "timestamp": "2026-07-14T02:05:00.000Z",
+      "type": "user",
+      "content": [{"text": "好的，谢谢"}]
+    },
+    {
+      "id": "m4",
+      "timestamp": "2026-07-14T02:05:05.000Z",
+      "type": "gemini",
+      "content": [{"text": "不客气！是 MIT。"}]
+    }
+  ]
+}
