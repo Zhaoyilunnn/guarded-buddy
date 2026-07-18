@@ -22,7 +22,8 @@ pub struct CliSpec {
 /// Built-in presets: all non-interactive.
 pub fn preset(name: &str) -> Option<CliSpec> {
     let (program, args, stdin_prompt) = match name {
-        "codex" => ("codex", vec!["exec", "-"], true),
+        // --skip-git-repo-check: cwd is out/<range>/ (not a git trust root).
+        "codex" => ("codex", vec!["exec", "--skip-git-repo-check", "-"], true),
         "claude" => ("claude", vec!["-p"], true),
         "agy" => ("agy", vec!["-p"], false),
         "gemini" => ("gemini", vec!["-p"], false),
@@ -181,7 +182,7 @@ mod tests {
     fn preset_table_matches_known_clis() {
         let codex = preset("codex").unwrap();
         assert_eq!(codex.program, "codex");
-        assert_eq!(codex.args, vec!["exec", "-"]);
+        assert_eq!(codex.args, vec!["exec", "--skip-git-repo-check", "-"]);
         assert!(codex.stdin_prompt);
 
         let claude = preset("claude").unwrap();
