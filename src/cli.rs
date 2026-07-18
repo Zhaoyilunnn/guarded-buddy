@@ -1,4 +1,4 @@
-//! CLI 定义（clap derive）与配置合并：CLI flag > config > 内置默认。
+//! CLI definition (clap derive) and config merging: CLI flag > config > built-in defaults.
 
 use std::path::PathBuf;
 
@@ -12,7 +12,7 @@ use crate::domain::{AgentKind, DateRange, DomainError};
 #[command(
     name = "ai-weekly-report",
     version,
-    about = "汇总多个 AI 编程助手的对话历史并生成周报"
+    about = "Aggregate AI coding-assistant conversation history and generate weekly reports"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -21,13 +21,13 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// 采集对话历史 → out/<起止日期>/<日期>.md
+    /// Collect conversation history → out/<start>_<end>/<date>.md
     Collect(CollectArgs),
-    /// 对已采集的目录生成周报
+    /// Generate a weekly report from a collected directory
     Report(ReportArgs),
-    /// collect + report 一键完成
+    /// collect + report in one step
     Run(RunArgs),
-    /// 列出本机检测到的数据源
+    /// List data sources detected on this machine
     Sources(SourcesArgs),
 }
 
@@ -55,20 +55,20 @@ pub struct RunArgs {
 
 #[derive(Debug, Args)]
 pub struct SourcesArgs {
-    /// 覆盖 $HOME（测试用）
+    /// Override $HOME (for tests)
     #[arg(long)]
     pub home: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Args)]
 pub struct RangeArgs {
-    /// 起始日期（含），YYYY-MM-DD；需与 --to 一起使用
+    /// Start date (inclusive), YYYY-MM-DD; must be used with --to
     #[arg(long)]
     pub from: Option<NaiveDate>,
-    /// 结束日期（含），YYYY-MM-DD
+    /// End date (inclusive), YYYY-MM-DD
     #[arg(long)]
     pub to: Option<NaiveDate>,
-    /// 回看天数（默认 7，与 --from/--to 互斥优先）
+    /// Lookback days (default 7; --from/--to take precedence when both are set)
     #[arg(long)]
     pub days: Option<u32>,
 }
@@ -77,60 +77,60 @@ pub struct RangeArgs {
 pub struct CommonArgs {
     #[command(flatten)]
     pub range: RangeArgs,
-    /// 输出根目录（默认 out）
+    /// Output root directory (default out)
     #[arg(long)]
     pub out: Option<PathBuf>,
-    /// 覆盖 $HOME（测试用）
+    /// Override $HOME (for tests)
     #[arg(long)]
     pub home: Option<PathBuf>,
-    /// 只采集指定 agent（逗号分隔：codex,cursor,claude,gemini）
+    /// Collect only specified agents (comma-separated: codex,cursor,claude,gemini)
     #[arg(long, value_delimiter = ',')]
     pub agents: Option<Vec<String>>,
-    /// Gemini/antigravity：同时纳入 history.jsonl（prompt 列表）
+    /// Gemini/antigravity: also include history.jsonl (prompt list)
     #[arg(long)]
     pub include_prompt_history: bool,
 }
 
 #[derive(Debug, Default, Args)]
 pub struct BackendArgs {
-    /// 总结后端：cli | api（默认 cli）
+    /// Summarization backend: cli | api (default cli)
     #[arg(long)]
     pub backend: Option<String>,
-    /// CLI 后端预设：codex | claude | agy | gemini（默认 claude）
+    /// CLI backend preset: codex | claude | agy | gemini (default claude)
     #[arg(long)]
     pub cli_name: Option<String>,
-    /// 自定义 CLI 命令（覆盖 --cli-name 预设，按空白切分）
+    /// Custom CLI command (overrides --cli-name preset; split on whitespace)
     #[arg(long)]
     pub cmd: Option<String>,
-    /// 周报模板文件
+    /// Weekly report template file
     #[arg(long)]
     pub template: Option<PathBuf>,
-    /// 周报输出到 stdout 而非写文件
+    /// Write report to stdout instead of a file
     #[arg(long)]
     pub stdout: bool,
-    /// API 后端 base URL（默认 https://api.openai.com/v1）
+    /// API backend base URL (default https://api.openai.com/v1)
     #[arg(long)]
     pub base_url: Option<String>,
-    /// 存放 API key 的环境变量名（默认 OPENAI_API_KEY）
+    /// Environment variable holding the API key (default OPENAI_API_KEY)
     #[arg(long)]
     pub api_key_env: Option<String>,
-    /// API 模型名（默认 gpt-4o-mini）
+    /// API model name (default gpt-4o-mini)
     #[arg(long)]
     pub model: Option<String>,
-    /// 外部 CLI 超时秒数（默认 600）
+    /// External CLI timeout in seconds (default 600)
     #[arg(long)]
     pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
-    #[error("--from 和 --to 必须同时提供")]
+    #[error("--from and --to must be provided together")]
     MissingRangeBound,
     #[error(transparent)]
     Range(#[from] DomainError),
-    #[error("未知的 backend: {0}（可选: cli, api）")]
+    #[error("unknown backend: {0} (expected: cli, api)")]
     InvalidBackend(String),
-    #[error("未知的 agent: {0}（可选: codex, cursor, claude, gemini）")]
+    #[error("unknown agent: {0} (expected: codex, cursor, claude, gemini)")]
     InvalidAgent(String),
 }
 
@@ -162,7 +162,7 @@ pub struct EffectiveBackend {
     pub timeout_secs: u64,
 }
 
-/// 合并采集侧选项。`today`/`default_home` 由调用方注入以便测试。
+/// Merge collect-side options. `today`/`default_home` are injected by callers for testing.
 pub fn resolve_common(
     common: &CommonArgs,
     config: &Config,
@@ -204,7 +204,7 @@ pub fn resolve_common(
     })
 }
 
-/// 合并总结后端选项。
+/// Merge summarization backend options.
 pub fn resolve_backend(args: &BackendArgs, config: &Config) -> Result<EffectiveBackend, CliError> {
     let kind = match args
         .backend
@@ -356,11 +356,11 @@ mod tests {
             ..Default::default()
         };
         let eff = resolve_common(&common, &config, today(), &fake_home()).unwrap();
-        assert_eq!(eff.range.start, d("2026-07-16")); // 今天往前 2 天
+        assert_eq!(eff.range.start, d("2026-07-16")); // 2 days before today
         assert_eq!(eff.range.end, today());
         // config > default
         let eff = resolve_common(&CommonArgs::default(), &config, today(), &fake_home()).unwrap();
-        assert_eq!(eff.range.start, d("2026-07-05")); // 14 天
+        assert_eq!(eff.range.start, d("2026-07-05")); // 14 days
         // default = 7
         let eff = resolve_common(
             &CommonArgs::default(),
@@ -369,7 +369,7 @@ mod tests {
             &fake_home(),
         )
         .unwrap();
-        assert_eq!(eff.range.start, d("2026-07-12")); // 7 天
+        assert_eq!(eff.range.start, d("2026-07-12")); // 7 days
     }
 
     #[test]
@@ -489,7 +489,7 @@ mod tests {
             timeout_secs: Some(60),
             ..Default::default()
         };
-        // config 生效
+        // config applies
         let eff = resolve_backend(&BackendArgs::default(), &config).unwrap();
         assert_eq!(eff.kind, BackendKind::Api);
         assert_eq!(eff.cli_name, "codex");
@@ -503,7 +503,7 @@ mod tests {
         let eff = resolve_backend(&args, &config).unwrap();
         assert_eq!(eff.kind, BackendKind::Cli);
         assert_eq!(eff.cli_name, "agy");
-        assert_eq!(eff.timeout_secs, 60); // 未覆盖的仍取 config
+        assert_eq!(eff.timeout_secs, 60); // unset fields still come from config
     }
 
     #[test]

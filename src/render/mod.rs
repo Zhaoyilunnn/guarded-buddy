@@ -1,3 +1,3 @@
-//! 渲染：单日统一 Markdown + 索引页。
+//! Rendering: daily unified Markdown + index page.
 
 pub mod daily;

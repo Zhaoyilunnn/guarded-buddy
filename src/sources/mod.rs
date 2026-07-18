@@ -1,7 +1,7 @@
-//! 数据源抽象：`HistorySource` trait 与四个 agent 的实现注册表。
+//! Data source abstraction: `HistorySource` trait and registry of four agent implementations.
 //!
-//! 开闭原则：新增一个 agent = 新增一个 `sources/<agent>.rs` 模块 + 在
-//! `default_sources` 注册一行，无需修改既有代码。
+//! Open/closed principle: add a new agent = add a `sources/<agent>.rs` module +
+//! one line in `default_sources`, without modifying existing code.
 
 use std::path::{Path, PathBuf};
 
@@ -28,30 +28,30 @@ pub enum SourceError {
     },
 }
 
-/// 一个 agent 数据源。实现必须满足：
-/// - 数据目录不存在时 `collect` 返回空 Vec 而非报错；
-/// - 单行/单文件解析失败计入 `warnings`，绝不中断整体采集。
+/// One agent data source. Implementations must satisfy:
+/// - when the data directory is missing, `collect` returns an empty Vec rather than an error;
+/// - single-line/file parse failures go into `warnings` and never abort collection.
 pub trait HistorySource: Send + Sync {
     fn kind(&self) -> AgentKind;
 
-    /// 该源读取的根目录（用于 `sources` 子命令展示）。
+    /// Root directory this source reads from (shown by the `sources` subcommand).
     fn root(&self) -> &Path;
 
-    /// 数据目录是否存在于本机。
+    /// Whether the data directory exists on this machine.
     fn detect(&self) -> bool {
         self.root().exists()
     }
 
-    /// 采集与 `range` 有交集的会话。
+    /// Collect sessions that overlap `range`.
     fn collect(&self, range: &DateRange, warnings: &mut Vec<SourceError>) -> Vec<Session>;
 }
 
-/// 默认注册表：Codex → Cursor → Claude → Gemini。
+/// Default registry: Codex → Cursor → Claude → Gemini.
 pub fn default_sources(home: &Path) -> Vec<Box<dyn HistorySource>> {
     default_sources_opts(home, false)
 }
 
-/// 带开关的注册表：`include_prompt_history` 透传给 Gemini 源。
+/// Registry with options: `include_prompt_history` is forwarded to the Gemini source.
 pub fn default_sources_opts(
     home: &Path,
     include_prompt_history: bool,
@@ -64,10 +64,10 @@ pub fn default_sources_opts(
     ]
 }
 
-/// 采集阶段单条消息的字符上限（防止超大文件撑爆内存）；渲染阶段另有更小的展示上限。
+/// Per-message character cap during ingestion (prevents huge files from exhausting memory); render stage has a smaller display cap.
 pub(crate) const INGEST_CAP: usize = 64 * 1024;
 
-/// 字符边界安全的采集截断。
+/// Character-boundary-safe ingestion truncation.
 pub(crate) fn cap_ingest(text: &str) -> String {
     if text.chars().count() <= INGEST_CAP {
         return text.to_string();
@@ -76,7 +76,7 @@ pub(crate) fn cap_ingest(text: &str) -> String {
     format!("{cut}…[truncated at ingest]")
 }
 
-/// 工具输入压缩为单行 JSON，限 120 字符（超出加省略号）。
+/// Compress tool input to a single-line JSON string, capped at 120 chars (ellipsis when longer).
 pub(crate) fn compact_json_input(value: Option<&serde_json::Value>) -> String {
     const MAX: usize = 120;
     let raw = value

@@ -1,8 +1,8 @@
-//! Cursor 数据源：`~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl`。
+//! Cursor data source: `~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl`.
 //!
-//! 每行 `{role, message.content[]}`（text / tool_use）。无顶层时间戳：
-//! user 文本内嵌 `<timestamp>Wednesday, Jul 15, 2026, 2:18 PM (UTC+8)</timestamp>`，
-//! 时间戳 fallback 链 = 内嵌时间戳 → 上一条消息时间戳 → 文件 mtime。
+//! Each line is `{role, message.content[]}` (text / tool_use). No top-level timestamp:
+//! user text embeds `<timestamp>Wednesday, Jul 15, 2026, 2:18 PM (UTC+8)</timestamp>`,
+//! timestamp fallback chain = embedded timestamp → previous message timestamp → file mtime.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -42,7 +42,7 @@ impl HistorySource for CursorSource {
         if !self.root.exists() {
             return sessions;
         }
-        // 结构：<slug>/agent-transcripts/<uuid>/<uuid>.jsonl（root 起第 4 层）
+        // layout: <slug>/agent-transcripts/<uuid>/<uuid>.jsonl (4th level from root)
         for entry in WalkDir::new(&self.root)
             .min_depth(4)
             .max_depth(4)
@@ -113,7 +113,7 @@ fn read_lines(path: &Path) -> Result<impl Iterator<Item = String>, SourceError> 
     Ok(BufReader::new(file).lines().map_while(Result::ok))
 }
 
-/// "Wednesday, Jul 15, 2026, 2:18 PM (UTC+8)" 形式的 Cursor 内嵌时间戳。
+/// Cursor embedded timestamp in the form "Wednesday, Jul 15, 2026, 2:18 PM (UTC+8)".
 static TS_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"^[A-Za-z]+, ([A-Za-z]{3}) (\d{1,2}), (\d{4}), (\d{1,2}):(\d{2}) ([AP]M) \(UTC([+-])(\d{1,2})(?::(\d{2}))?\)$",
@@ -121,8 +121,8 @@ static TS_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid regex")
 });
 
-/// 解析 Cursor 内嵌时间戳 → 带固定偏移的时间。英文月份缩写、小时制 AM/PM、
-/// `UTC±h[:mm]` 偏移。
+/// Parse Cursor embedded timestamp → time with fixed offset. English month abbreviations, AM/PM,
+/// `UTC±h[:mm]` offset.
 pub(crate) fn parse_cursor_timestamp(s: &str) -> Option<DateTime<FixedOffset>> {
     let caps = TS_RE.captures(s.trim())?;
     let month = month_from_abbrev(caps.get(1)?.as_str())?;
@@ -171,7 +171,7 @@ static WRAPPER_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid regex")
 });
 
-/// 从 user 文本中剥离 `<timestamp>` 与 `<user_query>` 包装，返回（时间戳， 查询）。
+/// Strip `<timestamp>` and `<user_query>` wrappers from user text; returns (timestamp, query).
 pub(crate) fn strip_user_wrapper(s: &str) -> Option<(DateTime<FixedOffset>, String)> {
     let caps = WRAPPER_RE.captures(s)?;
     let ts = parse_cursor_timestamp(caps.get(1)?.as_str())?;
@@ -184,8 +184,8 @@ pub(crate) struct ParseOutcome {
     pub bad_lines: Vec<usize>,
 }
 
-/// 解析一个 transcript 文件。`fallback_ts` 用于完全无时间戳信息的消息；
-/// 返回的 session.id 为空串，由调用方（source）从文件名填充。
+/// Parse one transcript file. `fallback_ts` is used for messages with no timestamp info;
+/// returned session.id is empty and filled by the caller (source) from the filename.
 pub(crate) fn parse_transcript_lines<I: Iterator<Item = String>>(
     lines: I,
     project: String,
@@ -267,7 +267,7 @@ pub(crate) fn parse_transcript_lines<I: Iterator<Item = String>>(
         session: Some(Session {
             agent: AgentKind::Cursor,
             project,
-            id: String::new(), // 由 source 从文件名填充
+            id: String::new(), // filled by source from filename
             started_at: messages[0].timestamp,
             messages,
         }),
@@ -370,7 +370,7 @@ mod tests {
         assert!(msgs[0].text().unwrap().contains("审查一下这个文档"));
         assert!(!msgs[0].text().unwrap().contains("user_query"));
 
-        // assistant 无内嵌时间戳 → 继承上一条消息时间戳
+        // assistant has no embedded timestamp → inherit previous message timestamp
         assert_eq!(msgs[1].role, Role::Assistant);
         assert_eq!(msgs[1].timestamp.to_utc(), utc("2026-07-15T06:18:00Z"));
 
@@ -397,8 +397,8 @@ mod tests {
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].0, "Read");
         assert!(tools[0].1.contains("README.md"));
-        assert!(!tools[0].1.contains('\n'), "summary 必须单行");
-        assert!(tools[0].1.len() <= 121); // 120 + 省略号
+        assert!(!tools[0].1.contains('\n'), "summary must be single-line");
+        assert!(tools[0].1.len() <= 121); // 120 + ellipsis
     }
 
     #[test]
@@ -419,7 +419,7 @@ mod tests {
             "p".to_string(),
             mtime(),
         );
-        // parse 阶段尚无 id（由 source 从文件名填）；占位约定为空字符串
+        // no id at parse stage (source fills from filename); placeholder convention is empty string
         assert_eq!(outcome.session.unwrap().id, "");
     }
 

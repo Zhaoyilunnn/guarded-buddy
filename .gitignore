@@ -9,3 +9,15 @@ CACHEDIR.TAG
 
 # Tool output
 /out
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+**/secrets.toml
+
+# Local IDE / agent settings (machine-specific paths)
+.claude/settings.local.json

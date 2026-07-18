@@ -1,5 +1,5 @@
-//! 配置文件：`~/.config/ai-weekly-report/config.toml`（可选）。
-//! 优先级：CLI flag > config > 内置默认。未知字段容忍（向前兼容）。
+//! Configuration file: `~/.config/ai-weekly-report/config.toml` (optional).
+//! Priority: CLI flag > config > built-in defaults. Unknown fields are tolerated (forward compatible).
 
 use std::path::{Path, PathBuf};
 
@@ -8,24 +8,24 @@ use serde::Deserialize;
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Config {
-    /// 输出根目录（相对 cwd 或绝对路径），默认 "out"。
+    /// Output root directory (relative to cwd or absolute), default "out".
     pub out_dir: Option<String>,
-    /// 默认回看天数，默认 7。
+    /// Default lookback days, default 7.
     pub days: Option<u32>,
-    /// 总结后端："cli" | "api"。
+    /// Summarization backend: "cli" | "api".
     pub backend: Option<String>,
-    /// CLI 后端预设名：codex | claude | agy | gemini。
+    /// CLI backend preset name: codex | claude | agy | gemini.
     pub cli_name: Option<String>,
-    /// 自定义 CLI 命令模板（覆盖 cli_name 预设）。
+    /// Custom CLI command template (overrides cli_name preset).
     pub cli_cmd: Option<String>,
-    /// 外部 CLI 超时秒数，默认 600。
+    /// External CLI timeout in seconds, default 600.
     pub timeout_secs: Option<u64>,
     pub api_base_url: Option<String>,
     pub api_key_env: Option<String>,
     pub api_model: Option<String>,
-    /// 周报模板文件路径。
+    /// Weekly report template file path.
     pub template: Option<PathBuf>,
-    /// Gemini/antigravity：是否纳入 history.jsonl。
+    /// Gemini/antigravity: whether to include history.jsonl.
     pub include_prompt_history: Option<bool>,
 }
 
@@ -46,14 +46,14 @@ pub enum ConfigError {
 }
 
 impl Config {
-    /// 默认配置路径：`<home>/.config/ai-weekly-report/config.toml`。
+    /// Default config path: `<home>/.config/ai-weekly-report/config.toml`.
     pub fn default_path(home: &Path) -> PathBuf {
         home.join(".config")
             .join("ai-weekly-report")
             .join("config.toml")
     }
 
-    /// 加载配置；文件不存在时返回全默认（所有字段 None）。
+    /// Load config; returns all defaults (every field None) when the file is missing.
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
         match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text).map_err(|source| ConfigError::Parse {

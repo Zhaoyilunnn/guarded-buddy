@@ -1,5 +1,5 @@
-//! 外部 CLI 后端：预设表（codex/claude/agy/gemini）+ 自定义命令，
-//! stdin 优先（避免 argv 长度/引号问题），wait-timeout 防挂起。
+//! External CLI backend: preset table (codex/claude/agy/gemini) + custom commands,
+//! stdin preferred (avoids argv length/quoting issues), wait-timeout prevents hangs.
 
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -8,17 +8,18 @@ use std::time::Duration;
 use wait_timeout::ChildExt;
 
 use super::{Prompt, ReportError, Summarizer};
+use crate::secrets::redact_secrets;
 
-/// 一个外部 CLI 的调用方式。
+/// How to invoke one external CLI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliSpec {
     pub program: String,
     pub args: Vec<String>,
-    /// true：prompt 走 stdin；false：prompt 追加为最后一个参数。
+    /// true: prompt via stdin; false: prompt appended as the last argument.
     pub stdin_prompt: bool,
 }
 
-/// 内置预设：均为非交互模式。
+/// Built-in presets: all non-interactive.
 pub fn preset(name: &str) -> Option<CliSpec> {
     let (program, args, stdin_prompt) = match name {
         "codex" => ("codex", vec!["exec", "-"], true),
@@ -34,13 +35,13 @@ pub fn preset(name: &str) -> Option<CliSpec> {
     })
 }
 
-/// 解析 `--cmd` 自定义命令：按空白切分（v1 不处理引号，复杂命令请包脚本），
-/// prompt 一律走 stdin。
+/// Parse `--cmd` custom command: split on whitespace (v1 does not handle quotes; wrap complex commands in a script),
+/// prompt always goes via stdin.
 pub fn parse_custom_cmd(template: &str) -> Result<CliSpec, ReportError> {
     let mut parts = template.split_whitespace();
     let Some(program) = parts.next() else {
         return Err(ReportError::ApiParse(
-            "自定义命令为空（--cmd 需要一个可执行程序）".to_string(),
+            "custom command is empty (--cmd requires an executable program)".to_string(),
         ));
     };
     Ok(CliSpec {
@@ -79,10 +80,10 @@ impl Summarizer for CliSummarizer {
         if self.spec.stdin_prompt
             && let Some(mut stdin) = child.stdin.take()
         {
-            // 子进程可能提前退出导致写入失败，忽略错误（最终会以退出码/超时报告）
+            // child may exit early and cause write to fail; ignore (exit code/timeout will report)
             let _ = stdin.write_all(prompt.text.as_bytes());
         }
-        // stdout/stderr 各起一个读取线程，避免管道缓冲区写满互相死锁
+        // spawn reader threads for stdout/stderr to avoid pipe buffer deadlock
         let mut out_thread = child.stdout.take().map(|mut pipe| {
             std::thread::spawn(move || {
                 let mut buf = String::new();
@@ -108,7 +109,7 @@ impl Summarizer for CliSummarizer {
                     Err(ReportError::CliFailed {
                         cmd: self.spec.program.clone(),
                         code: status.code(),
-                        stderr: stderr.unwrap_or_default(),
+                        stderr: redact_secrets(&stderr.unwrap_or_default()),
                     })
                 }
             }
@@ -135,7 +136,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    /// 在临时目录写一个可执行假脚本，返回其路径。
+    /// Write a temporary executable fake script and return its path.
     fn fake_script(body: &str) -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("fake-cli.sh");
@@ -155,7 +156,7 @@ mod tests {
         }
     }
 
-    // ---------- 预设表 ----------
+    // ---------- preset table ----------
 
     #[test]
     fn preset_table_matches_known_clis() {
@@ -194,7 +195,7 @@ mod tests {
         assert!(parse_custom_cmd("   ").is_err());
     }
 
-    // ---------- 执行 ----------
+    // ---------- execution ----------
 
     #[test]
     fn stdin_backend_feeds_prompt_and_captures_stdout() {
@@ -216,7 +217,7 @@ mod tests {
             dir: tmp.path().to_path_buf(),
         };
         let out = summarizer.summarize(&p).unwrap();
-        // macOS/Linux 下 tempdir 可能有 /private 前缀差异，比较 canonical 形式
+        // tempdir may have /private prefix differences on macOS/Linux; compare canonical paths
         let got = PathBuf::from(out.trim());
         let got = got.canonicalize().unwrap_or(got);
         assert_eq!(got, tmp.path().canonicalize().unwrap());
@@ -224,7 +225,7 @@ mod tests {
 
     #[test]
     fn arg_backend_passes_prompt_as_last_argument() {
-        // for 循环取最后一个位置参数
+        // for loop takes the last positional argument
         let (_t, path) = fake_script("for last; do :; done; echo \"$last\"");
         let mut spec = parse_custom_cmd(path.to_str().unwrap()).unwrap();
         spec.stdin_prompt = false;
@@ -263,7 +264,7 @@ mod tests {
         let summarizer = CliSummarizer::new(spec, Duration::from_millis(200));
         let start = std::time::Instant::now();
         let err = summarizer.summarize(&prompt("x")).unwrap_err();
-        assert!(start.elapsed() < Duration::from_secs(5), "应及时被杀掉");
+        assert!(start.elapsed() < Duration::from_secs(5), "should be killed promptly");
         assert!(matches!(err, ReportError::CliTimeout { .. }));
     }
 }

@@ -1,5 +1,5 @@
-//! 应用编排：把 cli/config/sources/collect/report 粘起来的薄胶合层。
-//! 业务逻辑均在各模块内（可单测）；这里只做顺序组合与类型转换。
+//! Application orchestration: thin glue layer wiring cli/config/sources/collect/report.
+//! Business logic lives in each module (unit-testable); this layer only sequences steps and converts types.
 
 use std::path::Path;
 use std::time::Duration;
@@ -13,7 +13,7 @@ use crate::report::{PromptMode, ReportError, Summarizer, assemble_prompt, load_c
 use crate::sources::{self, HistorySource};
 use crate::template::{TemplateContext, TemplateEngine};
 
-/// 按过滤条件构建数据源注册表。
+/// Build the data-source registry with optional agent filtering.
 pub fn build_sources(
     home: &Path,
     agents: &Option<Vec<AgentKind>>,
@@ -25,13 +25,13 @@ pub fn build_sources(
         .collect()
 }
 
-/// 采集并落盘到 `out_dir/<range.dir_name()>/`。
+/// Collect and write files under `out_dir/<range.dir_name()>/`.
 pub fn collect_into(common: &EffectiveCommon) -> std::io::Result<CollectOutcome> {
     let sources = build_sources(&common.home, &common.agents, common.include_prompt_history);
     collect(&sources, &common.range, &common.out_dir)
 }
 
-/// 对已采集的 range 目录生成周报文本。
+/// Generate weekly report text from a collected range directory.
 pub fn summarize_range_dir(
     backend: &EffectiveBackend,
     range_dir: &Path,

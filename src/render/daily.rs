@@ -1,16 +1,17 @@
-//! 单日统一 Markdown 渲染：固定 agent 顺序（Codex→Cursor→Claude Code→Gemini）、
-//! 会话按当日首条消息排序、正文超 2000 字符截断并标注原文字数。
+//! Daily unified Markdown rendering: fixed agent order (Codex→Cursor→Claude Code→Gemini),
+//! sessions sorted by first message of the day, message bodies truncated at 2000 chars with original length noted.
 
 use std::collections::BTreeMap;
 
 use chrono::{Datelike, NaiveDate, Weekday};
 
 use crate::domain::{AgentKind, DateRange, Message, MessageContent, Role, Session};
+use crate::secrets::redact_secrets;
 
-/// 渲染阶段单条消息正文的字符上限。
+/// Character cap for message body text at render time.
 pub const DISPLAY_CAP: usize = 2000;
 
-/// 字符边界安全截断：超过 `cap` 字符时截取并追加原文字数标注。
+/// Character-boundary-safe truncation: when over `cap` chars, truncate and append original length marker.
 pub fn truncate(text: &str, cap: usize) -> String {
     let total = text.chars().count();
     if total <= cap {
@@ -32,7 +33,7 @@ fn weekday_zh(date: NaiveDate) -> &'static str {
     }
 }
 
-/// 会话 id 展示形式：前 8 字符，空 id 显示 unknown。
+/// Session id display: first 8 characters, or unknown when empty.
 fn short_id(id: &str) -> String {
     if id.is_empty() {
         return "unknown".to_string();
@@ -40,11 +41,11 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-/// 渲染一天内所有会话。调用方保证传入的 session 只含当日消息。
+/// Render all sessions for one day. Caller guarantees each session contains only that day's messages.
 pub fn render_daily(date: NaiveDate, sessions: &[Session]) -> String {
     let mut out = format!("# {date} {} · AI 对话记录\n\n", weekday_zh(date));
 
-    // 统计行
+    // stats line
     let message_count: usize = sessions.iter().map(|s| s.messages.len()).sum();
     let mut per_agent: BTreeMap<AgentKind, usize> = BTreeMap::new();
     for s in sessions {
@@ -70,7 +71,7 @@ pub fn render_daily(date: NaiveDate, sessions: &[Session]) -> String {
         ));
     }
 
-    // 按固定 agent 顺序输出；会话按当日首条消息排序
+    // output in fixed agent order; sessions sorted by first message of the day
     for kind in AgentKind::ALL {
         let mut group: Vec<&Session> = sessions.iter().filter(|s| s.agent == kind).collect();
         if group.is_empty() {
@@ -111,15 +112,17 @@ fn render_message(message: &Message) -> String {
                 Role::Assistant => "🤖 助手",
                 Role::System => "⚙️ 系统",
             };
-            format!("\n**{icon}** `{time}`\n\n{}\n", truncate(text, DISPLAY_CAP))
+            let safe = redact_secrets(text);
+            format!("\n**{icon}** `{time}`\n\n{}\n", truncate(&safe, DISPLAY_CAP))
         }
         MessageContent::ToolUse { name, summary } => {
-            format!("\n**🔧 工具** `{time}` · `{name}`\n\n`{summary}`\n")
+            let safe = redact_secrets(summary);
+            format!("\n**🔧 工具** `{time}` · `{name}`\n\n`{safe}`\n")
         }
     }
 }
 
-/// 渲染索引页。`days` 只包含有数据的日期：(日期， 会话数， 消息数)。
+/// Render index page. `days` includes only dates with data: (date, session count, message count).
 pub fn render_index(
     range: &DateRange,
     days: &[(NaiveDate, usize, usize)],
@@ -293,7 +296,7 @@ mod tests {
     fn render_daily_orders_sessions_by_first_message() {
         let mut late = codex_session();
         late.id = "ffffffff-late".to_string();
-        // 两个 codex 会话，故意乱序传入
+        // two codex sessions passed in reverse order on purpose
         let mut early = codex_session();
         early.id = "00000000-early".to_string();
         early.started_at = at("2026-07-15", "08:00");
@@ -313,6 +316,20 @@ mod tests {
     }
 
     #[test]
+    fn render_daily_redacts_api_keys_in_message_bodies() {
+        let mut s = claude_session();
+        s.messages = vec![text_msg(
+            Role::User,
+            "2026-07-15",
+            "11:01",
+            "my key is sk-abcdefghijklmnopqrstuvwxyz012345 do not leak",
+        )];
+        let md = render_daily(d("2026-07-15"), &[s]);
+        assert!(!md.contains("sk-abcdefghijklmnopqrstuvwxyz012345"));
+        assert!(md.contains("[REDACTED]"));
+    }
+
+    #[test]
     fn weekday_rendered_in_chinese() {
         let sessions = vec![codex_session()];
         assert!(render_daily(d("2026-07-12"), &sessions).contains("周日"));
@@ -325,7 +342,7 @@ mod tests {
     #[test]
     fn render_index_marks_empty_days_and_totals() {
         let range = DateRange::new(d("2026-07-13"), d("2026-07-15")).unwrap();
-        // 只有 7-14 有数据：3 会话 42 消息
+        // only 7-14 has data: 3 sessions, 42 messages
         let days = vec![(d("2026-07-14"), 3usize, 42usize)];
         let md = render_index(&range, &days, 0);
         let expected = "# AI 对话记录索引（2026-07-13 ~ 2026-07-15）\n\

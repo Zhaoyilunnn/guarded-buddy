@@ -1,14 +1,14 @@
-//! Gemini 数据源（双布局合并）：
+//! Gemini data source (dual layout merge):
 //!
-//! - classic：`~/.gemini/tmp/<slug>/chats/session-*.json`（单 JSON 文档，
-//!   `messages[]` 中 `type: user|gemini`，content 为 `{text}` parts，
-//!   assistant 可带 `toolCalls`）；项目名读 `<slug>/.project_root`（首行）。
-//! - agy/Antigravity：`~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/transcript.jsonl`
-//!   （`USER_INPUT` 剥 `<USER_REQUEST>`/`<ADDITIONAL_METADATA>` 等包装；
-//!   `PLANNER_RESPONSE` 的 content → 助手文本、tool_calls → 工具调用；
-//!   VIEW_FILE 等工具结果与 SYSTEM 记录跳过）。
-//! - `antigravity-cli/history.jsonl`（仅用户 prompt，毫秒时间戳，按 workspace 分组）
-//!   与 transcript 重复，默认排除，`include_prompt_history` 开关打开才纳入。
+//! - classic: `~/.gemini/tmp/<slug>/chats/session-*.json` (single JSON document,
+//!   `messages[]` with `type: user|gemini`, content as `{text}` parts,
+//!   assistant may include `toolCalls`); project name from `<slug>/.project_root` (first line).
+//! - agy/Antigravity: `~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/transcript.jsonl`
+//!   (`USER_INPUT` strips `<USER_REQUEST>`/`<ADDITIONAL_METADATA>` wrappers;
+//!   `PLANNER_RESPONSE` content → assistant text, tool_calls → tool use;
+//!   VIEW_FILE and other tool results plus SYSTEM records are skipped).
+//! - `antigravity-cli/history.jsonl` (user prompts only, millisecond timestamps, grouped by workspace)
+//!   duplicates transcript content, excluded by default; included when `include_prompt_history` is enabled.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -36,7 +36,7 @@ impl GeminiSource {
         }
     }
 
-    /// 是否纳入 antigravity `history.jsonl`（仅 prompt 列表，与 transcript 重复）。
+    /// Whether to include antigravity `history.jsonl` (prompt list only; duplicates transcript).
     pub fn include_prompt_history(mut self, include: bool) -> Self {
         self.include_prompt_history = include;
         self
@@ -48,7 +48,7 @@ impl GeminiSource {
         if !tmp_root.exists() {
             return sessions;
         }
-        // 结构：<slug>/chats/session-*.json（tmp_root 起第 3 层）
+        // layout: <slug>/chats/session-*.json (3rd level from tmp_root)
         for entry in WalkDir::new(&tmp_root)
             .min_depth(3)
             .max_depth(3)
@@ -104,7 +104,7 @@ impl GeminiSource {
         let cli_root = self.root.join("antigravity-cli");
         let brain = cli_root.join("brain");
         if brain.exists() {
-            // 结构：<uuid>/.system_generated/logs/transcript.jsonl（brain 起第 4 层）
+            // layout: <uuid>/.system_generated/logs/transcript.jsonl (4th level from brain)
             for entry in WalkDir::new(&brain)
                 .min_depth(4)
                 .max_depth(4)
@@ -192,7 +192,7 @@ fn push_if_in_range(sessions: &mut Vec<Session>, session: Session, range: &DateR
     }
 }
 
-/// classic 布局的项目名：`<slug>/.project_root` 首行为工作区路径。
+/// Project name for classic layout: first line of `<slug>/.project_root` is the workspace path.
 fn project_root_of(slug_dir: &Path) -> Option<String> {
     let text = std::fs::read_to_string(slug_dir.join(".project_root")).ok()?;
     let first = text.lines().next()?.trim();
@@ -211,7 +211,7 @@ fn read_lines(path: &Path) -> Result<impl Iterator<Item = String>, SourceError> 
     Ok(BufReader::new(file).lines().map_while(Result::ok))
 }
 
-/// ISO8601/RFC3339（UTC）→ 本地时区。
+/// ISO8601/RFC3339 (UTC) → local timezone.
 fn parse_iso(s: &str) -> Option<DateTime<Local>> {
     DateTime::parse_from_rfc3339(s)
         .ok()
@@ -222,8 +222,8 @@ static USER_REQUEST_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>").expect("valid regex")
 });
 
-/// agy user content 剥掉 `<USER_REQUEST>` 包装（其余元数据段一并丢弃）；
-/// 无包装时原样返回。
+/// Strip `<USER_REQUEST>` wrapper from agy user content (other metadata sections are discarded);
+/// returns original text when no wrapper is present.
 pub(crate) fn strip_agy_user_wrapper(s: &str) -> String {
     match USER_REQUEST_RE.captures(s) {
         Some(caps) => caps
@@ -239,8 +239,8 @@ pub(crate) struct AgyParseOutcome {
     pub bad_lines: Vec<usize>,
 }
 
-/// 解析一个 agy transcript.jsonl。session.id 为空串，由 source 从 brain 目录名填充；
-/// project 恒为 "unknown"（transcript 中无可靠工作区信息）。
+/// Parse one agy transcript.jsonl. session.id is empty and filled by source from brain dir name;
+/// project is always "unknown" (transcript has no reliable workspace info).
 pub(crate) fn parse_agy_lines<I: Iterator<Item = String>>(lines: I) -> AgyParseOutcome {
     let mut bad_lines = Vec::new();
     let mut messages: Vec<Message> = Vec::new();
@@ -303,9 +303,9 @@ pub(crate) fn parse_agy_lines<I: Iterator<Item = String>>(lines: I) -> AgyParseO
                         content: MessageContent::Text(cap_ingest(text)),
                     });
                 }
-                // thinking 字段有意忽略
+                // thinking field intentionally ignored
             }
-            // SYSTEM / CONVERSATION_HISTORY / CHECKPOINT / VIEW_FILE 等工具结果跳过
+            // SYSTEM / CONVERSATION_HISTORY / CHECKPOINT / VIEW_FILE tool results skipped
             _ => {}
         }
     }
@@ -320,7 +320,7 @@ pub(crate) fn parse_agy_lines<I: Iterator<Item = String>>(lines: I) -> AgyParseO
         session: Some(Session {
             agent: AgentKind::Gemini,
             project: "unknown".to_string(),
-            id: String::new(), // 由 source 从 brain 目录名填充
+            id: String::new(), // filled by source from brain directory name
             started_at: messages[0].timestamp,
             messages,
         }),
@@ -328,7 +328,7 @@ pub(crate) fn parse_agy_lines<I: Iterator<Item = String>>(lines: I) -> AgyParseO
     }
 }
 
-/// 解析 classic `session-*.json` 单文档。失败（坏 JSON / 无消息）返回 None。
+/// Parse classic `session-*.json` document. Returns None on failure (bad JSON / no messages).
 pub(crate) fn parse_classic_chat(
     text: &str,
     fallback_id: String,
@@ -356,7 +356,7 @@ pub(crate) fn parse_classic_chat(
         else {
             continue;
         };
-        // content：字符串 或 [{text}] parts
+        // content: string or [{text}] parts
         match record.get("content") {
             Some(serde_json::Value::String(s)) if !s.trim().is_empty() => {
                 messages.push(Message {
@@ -412,8 +412,8 @@ pub(crate) fn parse_classic_chat(
     })
 }
 
-/// 解析 antigravity `history.jsonl`：仅用户 prompt，按 workspace 分组为
-/// 每个工作区一个 session（id 固定 "prompt-history"）。`slash_command` 跳过。
+/// Parse antigravity `history.jsonl`: user prompts only, grouped by workspace into
+/// one session per workspace (id fixed to "prompt-history"). Skips `slash_command`.
 pub(crate) fn parse_history_lines<I: Iterator<Item = String>>(
     lines: I,
 ) -> (Vec<Session>, Vec<usize>) {
@@ -498,7 +498,7 @@ mod tests {
         DateTime::parse_from_rfc3339(s).unwrap().to_utc()
     }
 
-    // ---------- agy user 包装剥离 ----------
+    // ---------- agy user wrapper stripping ----------
 
     #[test]
     fn agy_wrapper_stripped_keeps_only_request_text() {
@@ -513,7 +513,7 @@ mod tests {
         assert_eq!(strip_agy_user_wrapper("普通文本"), "普通文本");
     }
 
-    // ---------- agy transcript 解析 ----------
+    // ---------- agy transcript parsing ----------
 
     #[test]
     fn parses_agy_fixture_end_to_end() {
@@ -563,8 +563,8 @@ mod tests {
         let session = outcome.session.unwrap();
         for m in &session.messages {
             if let Some(t) = m.text() {
-                assert!(!t.contains("Analyzing"), "thinking 不应成为消息");
-                assert!(!t.contains("Created At:"), "工具结果不应成为消息");
+                assert!(!t.contains("Analyzing"), "thinking must not become a message");
+                assert!(!t.contains("Created At:"), "tool results must not become messages");
             }
         }
     }
@@ -575,7 +575,7 @@ mod tests {
         assert_eq!(outcome.session.unwrap().id, "");
     }
 
-    // ---------- classic chat 解析 ----------
+    // ---------- classic chat parsing ----------
 
     #[test]
     fn parses_classic_chat_fixture() {
@@ -619,7 +619,7 @@ mod tests {
         assert!(parse_classic_chat("not json", "fb".to_string(), "p".to_string()).is_none());
     }
 
-    // ---------- history.jsonl 解析 ----------
+    // ---------- history.jsonl parsing ----------
 
     #[test]
     fn history_groups_by_workspace_and_skips_slash_commands() {
@@ -630,7 +630,7 @@ mod tests {
             .iter()
             .find(|s| s.project == "/mnt/d/Research/XQ")
             .unwrap();
-        assert_eq!(xq.messages.len(), 1); // slash_command 被跳过
+        assert_eq!(xq.messages.len(), 1); // slash_command skipped
         assert_eq!(xq.messages[0].role, Role::User);
         assert_eq!(xq.messages[0].text().unwrap(), "把周报生成器加上 --stdout 选项");
         assert_eq!(xq.messages[0].timestamp.to_utc(), utc("2026-07-14T04:00:00Z"));
@@ -642,9 +642,9 @@ mod tests {
         assert_eq!(interview.messages.len(), 1);
     }
 
-    // ---------- source 采集（fake $HOME） ----------
+    // ---------- source collection (fake $HOME) ----------
 
-    /// 在 fake home 下构造 agy + classic + history 三种布局。
+    /// Build agy + classic + history layouts under a fake home.
     fn build_fake_home() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         // agy
@@ -677,7 +677,7 @@ mod tests {
         let range = DateRange::new(d("2026-07-12"), d("2026-07-18")).unwrap();
         let mut warnings: Vec<SourceError> = Vec::new();
         let sessions = source.collect(&range, &mut warnings);
-        // agy ×1 + classic ×1，history 默认排除
+        // agy ×1 + classic ×1, history excluded by default
         assert_eq!(sessions.len(), 2);
         assert!(
             sessions
@@ -727,7 +727,7 @@ mod tests {
         let range = DateRange::new(d("2026-07-12"), d("2026-07-18")).unwrap();
         let mut warnings = Vec::new();
         let sessions = source.collect(&range, &mut warnings);
-        // agy ×1 + classic ×1 + history ×2（按 workspace 分组）
+        // agy ×1 + classic ×1 + history ×2 (grouped by workspace)
         assert_eq!(sessions.len(), 4);
         assert_eq!(
             sessions

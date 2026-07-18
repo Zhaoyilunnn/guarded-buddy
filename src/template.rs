@@ -1,6 +1,6 @@
-//! 周报模板：内置中文默认模板 + 用户自定义模板文件的宽松 `{{placeholder}}` 替换。
+//! Weekly report template: built-in Chinese default template + lenient `{{placeholder}}` substitution from custom files.
 
-/// 默认周报模板。可用占位符：`{{start_date}}` `{{end_date}}` `{{stats}}` `{{daily_notes}}`。
+/// Default weekly report template. Placeholders: `{{start_date}}` `{{end_date}}` `{{stats}}` `{{daily_notes}}`.
 pub const DEFAULT_TEMPLATE: &str = r#"你是一名资深软件工程师的助理。以下是我在 {{start_date}} 至 {{end_date}} 一周内与多个 AI 编程助手（Codex / Cursor / Claude Code / Gemini）的对话记录统计与每日记录。请据此生成一份高质量的中文周报。
 
 ## 本周统计
@@ -29,7 +29,7 @@ pub const DEFAULT_TEMPLATE: &str = r#"你是一名资深软件工程师的助理
 注意：仅基于以上对话记录撰写，不要编造记录中不存在的内容；语言简洁专业。
 "#;
 
-/// 模板渲染上下文。
+/// Template rendering context.
 pub struct TemplateContext {
     pub start_date: String,
     pub end_date: String,
@@ -37,7 +37,7 @@ pub struct TemplateContext {
     pub daily_notes: String,
 }
 
-/// 宽松的占位符替换引擎：仅替换已知的四个占位符，未知 `{{key}}` 原样保留。
+/// Lenient placeholder engine: replaces only the four known placeholders; unknown `{{key}}` values are left as-is.
 pub struct TemplateEngine {
     pub(crate) template: String,
 }

@@ -1,8 +1,8 @@
-//! 核心领域类型：跨所有 agent 数据源共享的统一模型。
+//! Core domain types: unified model shared across all agent data sources.
 
 use chrono::{DateTime, Duration, Local, NaiveDate};
 
-/// 支持的 AI 编程助手种类。渲染与 CLI 过滤均按 `ALL` 中的固定顺序。
+/// Supported AI coding assistant kinds. Rendering and CLI filtering use the fixed order in `ALL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AgentKind {
     Codex,
@@ -19,7 +19,7 @@ impl AgentKind {
         AgentKind::Gemini,
     ];
 
-    /// 面向用户的名称（用于 Markdown 标题）。
+    /// User-facing name (used in Markdown headings).
     pub fn display_name(&self) -> &'static str {
         match self {
             AgentKind::Codex => "Codex",
@@ -29,7 +29,7 @@ impl AgentKind {
         }
     }
 
-    /// CLI/配置中使用的标识符。
+    /// Identifier used in CLI/config.
     pub fn slug(&self) -> &'static str {
         match self {
             AgentKind::Codex => "codex",
@@ -48,11 +48,11 @@ impl AgentKind {
 pub enum Role {
     User,
     Assistant,
-    #[allow(dead_code)] // 预留给未来纳入 system 消息
+    #[allow(dead_code)] // reserved for future system messages
     System,
 }
 
-/// 消息内容：纯文本，或一次工具调用（压缩为一行摘要）。
+/// Message content: plain text, or a tool call (compressed to a one-line summary).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageContent {
     Text(String),
@@ -75,7 +75,7 @@ impl MessageContent {
 #[derive(Debug, Clone)]
 pub struct Message {
     pub role: Role,
-    /// 本地时区时间（解析边界处已从 UTC/偏移转换）。
+    /// Local timezone time (converted from UTC/offset at parse boundaries).
     pub timestamp: DateTime<Local>,
     pub content: MessageContent,
 }
@@ -90,19 +90,19 @@ impl Message {
     }
 }
 
-/// 一次完整会话（一个 rollout 文件 / 一个 transcript / 一个 chat）。
+/// One full session (one rollout file / one transcript / one chat).
 #[derive(Debug, Clone)]
 pub struct Session {
     pub agent: AgentKind,
-    /// 工作目录（codex/claude）或项目标识（cursor/gemini）。
+    /// Working directory (codex/claude) or project identifier (cursor/gemini).
     pub project: String,
     pub id: String,
     pub started_at: DateTime<Local>,
-    /// 按时间升序。
+    /// Sorted ascending by time.
     pub messages: Vec<Message>,
 }
 
-/// 本地日历日闭区间。
+/// Closed interval of local calendar days.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DateRange {
     pub start: NaiveDate,
@@ -123,7 +123,7 @@ impl DateRange {
         Ok(Self { start, end })
     }
 
-    /// 以 `today` 为终点（含）向前数 n 天。
+    /// Last n days ending on `today` (inclusive).
     pub fn last_n_days(n: u32, today: NaiveDate) -> Self {
         let n = n.max(1) as i64;
         Self {
@@ -150,7 +150,7 @@ impl DateRange {
         out
     }
 
-    /// 输出目录名，如 `2026-07-12_2026-07-18`。
+    /// Output directory name, e.g. `2026-07-12_2026-07-18`.
     pub fn dir_name(&self) -> String {
         format!("{}_{}", self.start, self.end)
     }

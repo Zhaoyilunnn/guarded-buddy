@@ -1,4 +1,4 @@
-//! ai-weekly-report：汇总多个 AI 编程助手对话历史并生成周报的库。
+//! ai-weekly-report: library for aggregating AI coding-assistant conversation history and generating weekly reports.
 
 pub mod app;
 pub mod cli;
@@ -7,5 +7,6 @@ pub mod config;
 pub mod domain;
 pub mod render;
 pub mod report;
+pub mod secrets;
 pub mod sources;
 pub mod template;

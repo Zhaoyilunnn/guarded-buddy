@@ -1,4 +1,4 @@
-//! 薄入口：CLI → config → dispatch → exit code。
+//! Thin entry point: CLI → config → dispatch → exit code.
 
 use std::path::Path;
 
@@ -11,7 +11,7 @@ use clap::Parser;
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let default_home = dirs::home_dir().context("无法确定 $HOME 目录")?;
+    let default_home = dirs::home_dir().context("unable to determine $HOME directory")?;
     let config = Config::load(&Config::default_path(&default_home))?;
     let today = chrono::Local::now().date_naive();
 
@@ -56,7 +56,7 @@ fn print_collect_result(outcome: &ai_weekly_report::collect::CollectOutcome) {
         eprintln!("warning: {warning}");
     }
     println!(
-        "已采集 {} 天的记录 → {}",
+        "Collected records for {} days → {}",
         outcome.buckets.len(),
         outcome.dir.display()
     );
@@ -68,7 +68,7 @@ fn emit_report(report: &str, dir: &Path, stdout: bool) -> anyhow::Result<()> {
     } else {
         let path = dir.join("report.md");
         std::fs::write(&path, report)?;
-        println!("周报已写入 {}", path.display());
+        println!("Weekly report written to {}", path.display());
     }
     Ok(())
 }

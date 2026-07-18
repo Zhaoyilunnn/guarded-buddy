@@ -1,5 +1,5 @@
-//! 周报总结：`Summarizer` trait、prompt 组装（FilesManifest / Inline 两种模式）、
-//! 统计行构建。
+//! Weekly report summarization: `Summarizer` trait, prompt assembly (FilesManifest / Inline modes),
+//! and stats line construction.
 
 pub mod api_backend;
 pub mod cli_backend;
@@ -12,39 +12,39 @@ use crate::domain::AgentKind;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReportError {
-    #[error("外部 CLI `{cmd}` 执行失败（退出码 {code:?}）：{stderr}")]
+    #[error("external CLI `{cmd}` failed (exit code {code:?}): {stderr}")]
     CliFailed {
         cmd: String,
         code: Option<i32>,
         stderr: String,
     },
-    #[error("外部 CLI `{cmd}` 超时（{secs} 秒）已被终止")]
+    #[error("external CLI `{cmd}` timed out after {secs} seconds and was terminated")]
     CliTimeout { cmd: String, secs: u64 },
-    #[error("无法启动外部 CLI `{cmd}`：{source}")]
+    #[error("failed to spawn external CLI `{cmd}`: {source}")]
     Spawn {
         cmd: String,
         #[source]
         source: std::io::Error,
     },
-    #[error("环境变量 {0} 未设置（用于读取 API key）")]
+    #[error("environment variable {0} is not set (used to read API key)")]
     MissingApiKey(String),
-    #[error("API 请求失败：{0}")]
+    #[error("API request failed: {0}")]
     Http(String),
-    #[error("API 返回状态 {status}：{body}")]
+    #[error("API returned status {status}: {body}")]
     ApiStatus { status: u16, body: String },
-    #[error("无法解析 API 响应：{0}")]
+    #[error("failed to parse API response: {0}")]
     ApiParse(String),
-    #[error("采集目录不存在：{0}（请先运行 collect）")]
+    #[error("collected directory does not exist: {0} (run collect first)")]
     DirNotFound(PathBuf),
-    #[error("采集目录 {0} 下没有日记录文件（请先运行 collect）")]
+    #[error("no daily record files under collected directory {0} (run collect first)")]
     EmptyDir(PathBuf),
-    #[error("未知的 CLI 预设：{0}（可选: codex, claude, agy, gemini；或用 --cmd 自定义）")]
+    #[error("unknown CLI preset: {0} (expected: codex, claude, agy, gemini; or use --cmd for a custom command)")]
     UnknownCliPreset(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 
-/// prompt 组装模式：CLI 后端用文件清单（让它自己读目录），API 后端内嵌全文。
+/// Prompt assembly mode: CLI backend uses a file manifest (reads the directory itself); API backend inlines full text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptMode {
     FilesManifest,
@@ -54,19 +54,19 @@ pub enum PromptMode {
 #[derive(Debug)]
 pub struct Prompt {
     pub text: String,
-    /// CLI 后端的工作目录（range 目录）。
+    /// Working directory for the CLI backend (the range directory).
     pub dir: PathBuf,
 }
 
-/// 总结后端抽象（CLI / API 两种实现）。
+/// Summarization backend abstraction (CLI / API implementations).
 pub trait Summarizer {
     fn summarize(&self, prompt: &Prompt) -> Result<String, ReportError>;
 }
 
-/// Inline 模式内嵌全文的总字符预算（200KB）。
+/// Total character budget for inlined full text in Inline mode (200KB).
 pub const INLINE_BUDGET: usize = 200 * 1024;
 
-/// 组装 prompt。`files` 为（文件名， 内容）对（通常是不含 index 的日文件）。
+/// Assemble a prompt. `files` is (filename, content) pairs (usually daily files excluding index).
 pub fn assemble_prompt(
     rendered_template: &str,
     mode: PromptMode,
@@ -90,14 +90,16 @@ pub fn assemble_prompt(
             let mut text = format!("{rendered_template}\n\n## 对话记录\n");
             if total <= INLINE_BUDGET {
                 for (name, content) in files {
-                    text.push_str(&format!("\n### 文件 {name}\n\n{content}\n"));
+                    let safe = crate::secrets::redact_secrets(content);
+                    text.push_str(&format!("\n### 文件 {name}\n\n{safe}\n"));
                 }
             } else {
-                // 超预算：按文件数均分预算逐个截断
+                // over budget: split budget evenly across files and truncate each
                 let share = INLINE_BUDGET / files.len().max(1);
                 for (name, content) in files {
-                    let count = content.chars().count();
-                    let body: String = content.chars().take(share).collect();
+                    let safe = crate::secrets::redact_secrets(content);
+                    let count = safe.chars().count();
+                    let body: String = safe.chars().take(share).collect();
                     if count > share {
                         text.push_str(&format!(
                             "\n### 文件 {name}\n\n{body}…（已截断，原文共 {count} 字符）\n"
@@ -116,7 +118,7 @@ pub fn assemble_prompt(
     }
 }
 
-/// 汇总统计行（模板 `{{stats}}` 占位符的内容）。
+/// Build summary stats lines (content for template `{{stats}}` placeholder).
 pub fn build_stats(buckets: &[DayBucket]) -> String {
     if buckets.is_empty() {
         return "本周无对话记录".to_string();
@@ -148,18 +150,18 @@ fn agent_from_heading(heading: &str) -> Option<AgentKind> {
         .find(|k| k.display_name() == heading)
 }
 
-/// 已采集目录的内容 + 由文件反推的统计（尊重用户对日文件的手工编辑）。
+/// Loaded collected directory content + stats inferred from files (respects manual edits to daily files).
 #[derive(Debug)]
 pub struct DirSummary {
-    /// （文件名， 内容）按文件名排序，不含 index.md。
+    /// (filename, content) pairs sorted by filename, excluding index.md.
     pub files: Vec<(String, String)>,
     pub stats: String,
 }
 
-/// 读取 `out/<range>/` 下所有日文件并统计会话/消息数。
-/// 统计锚定我们自己渲染的结构行——`## <Agent名>`（精确匹配）、
-/// `### 会话 \`<8位id|unknown>\` · `、`- 时间: … · N 条消息`，
-/// 以免正文里混入的 markdown 标题干扰计数。
+/// Read all daily files under `out/<range>/` and count sessions/messages.
+/// Counts anchor on our rendered structure lines — `## <AgentName>` (exact match),
+/// `### 会话 \`<8-char id|unknown>\` · `, `- 时间: … · N 条消息` —
+/// so markdown headings inside message bodies do not skew counts.
 pub fn load_collected_dir(dir: &Path) -> Result<DirSummary, ReportError> {
     if !dir.is_dir() {
         return Err(ReportError::DirNotFound(dir.to_path_buf()));
@@ -181,7 +183,7 @@ pub fn load_collected_dir(dir: &Path) -> Result<DirSummary, ReportError> {
         let mut current_agent: Option<AgentKind> = None;
         for line in content.lines() {
             if let Some(heading) = line.strip_prefix("## ") {
-                // 只有精确的 agent 名才切换段落；正文中的 `## xxx` 忽略
+                // only exact agent names switch sections; `## xxx` in message bodies is ignored
                 if let Some(kind) = agent_from_heading(heading.trim()) {
                     current_agent = Some(kind);
                 }
@@ -199,8 +201,8 @@ pub fn load_collected_dir(dir: &Path) -> Result<DirSummary, ReportError> {
     Ok(DirSummary { files, stats })
 }
 
-/// 匹配渲染出的会话标题：`### 会话 \`<id>\` · `。正文里的自然标题
-/// （如 `### 一、架构对比`）不会带反引号 id 段，不会误命中。
+/// Match rendered session headings: `### 会话 \`<id>\` · `. Natural headings in message bodies
+/// (e.g. `### 一、架构对比`) lack the backtick id segment and will not match.
 fn is_session_heading(line: &str) -> bool {
     let Some(rest) = line.strip_prefix("### 会话 `") else {
         return false;
@@ -211,12 +213,12 @@ fn is_session_heading(line: &str) -> bool {
     end > 0 && rest[end + 1..].starts_with(" · ")
 }
 
-/// 解析会话元信息行 `- 时间: HH:MM – HH:MM · N 条消息` 中的 N。
+/// Parse N from session meta line `- 时间: HH:MM – HH:MM · N 条消息`.
 fn parse_session_meta_count(line: &str) -> Option<usize> {
     let rest = line.strip_prefix("- 时间: ")?;
     let count_part = rest.strip_suffix(" 条消息")?;
     let n = count_part.rsplit(" · ").next()?;
-    // 时间部分必须形如 "HH:MM – HH:MM"（粗略校验，防正文撞行）
+    // time part must look like "HH:MM – HH:MM" (rough check to avoid false positives in body text)
     let time_part = count_part.strip_suffix(&format!(" · {n}"))?;
     let mut halves = time_part.split(" – ");
     let valid = matches!(
@@ -298,7 +300,7 @@ mod tests {
 
     #[test]
     fn inline_mode_truncates_proportionally_over_budget() {
-        // 3 个文件各 100KB，总预算 200KB → 每个约 66KB，全文必须低于预算上限
+        // 3 files at 100KB each, 200KB total budget → ~66KB each; full prompt must stay under budget
         let big = "字".repeat(100 * 1024);
         let files: Vec<(String, String)> = (0..3)
             .map(|i| (format!("f{i}.md"), big.clone()))
@@ -354,7 +356,7 @@ mod tests {
         std::fs::write(dir.join("index.md"), "# 索引（不应计入）\n").unwrap();
 
         let summary = load_collected_dir(dir).unwrap();
-        assert_eq!(summary.files.len(), 2, "index.md 应被排除");
+        assert_eq!(summary.files.len(), 2, "index.md should be excluded");
         assert_eq!(summary.files[0].0, "2026-07-15.md");
         assert!(summary.files[0].1.contains("AI 对话记录"));
         assert_eq!(
@@ -365,8 +367,8 @@ mod tests {
 
     #[test]
     fn load_collected_dir_ignores_headings_inside_message_bodies() {
-        // 助手正文里的 markdown 标题（如 "## 综合分析"、"### 一、对比"）
-        // 不应干扰统计
+        // markdown headings inside assistant message bodies (e.g. "## 综合分析", "### 一、对比")
+        // must not affect stats
         let tmp = tempfile::tempdir().unwrap();
         let mut s = session(AgentKind::Cursor, "c1", 0);
         s.messages = vec![

@@ -1,5 +1,5 @@
-//! 端到端集成测试：fake $HOME（四类源布局）+ TZ=Asia/Shanghai 子进程 +
-//! 假 CLI 后端脚本。
+//! End-to-end integration tests: fake $HOME (four source layouts) + TZ=Asia/Shanghai subprocess +
+//! fake CLI backend script.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -8,7 +8,7 @@ use std::path::Path;
 const CLAUDE_SAMPLE: &str = include_str!("fixtures/claude/session-sample.jsonl");
 const CURSOR_SAMPLE: &str = include_str!("fixtures/cursor/transcript-sample.jsonl");
 
-/// 跨日边界 codex rollout：消息在 2026-07-15T16:30Z（UTC+8 下是 07-16 00:30）。
+/// Cross-day boundary codex rollout: message at 2026-07-15T16:30Z (07-16 00:30 under UTC+8).
 const CODEX_BOUNDARY: &str = concat!(
     "{\"timestamp\":\"2026-07-15T16:25:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"bbbb2222-0000-4000-8000-000000000000\",\"cwd\":\"/home/zhaoyilun/boundary-proj\"}}\n",
     "{\"timestamp\":\"2026-07-15T16:30:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"跨日边界的提问\"}}\n",
@@ -20,11 +20,11 @@ fn write(path: &Path, content: &str) {
     std::fs::write(path, content).unwrap();
 }
 
-/// 构造含四类源布局的 fake $HOME（gemini 用 agy transcript fixture 动态生成）。
+/// Build a fake $HOME with all four source layouts (gemini uses dynamically generated agy transcript fixture).
 fn fake_home() -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     let h = home.path();
-    // codex（跨日边界）
+    // codex (cross-day boundary)
     write(
         &h.join(".codex/sessions/2026/07/15/rollout-2026-07-15T16-25-00-bbbb2222.jsonl"),
         CODEX_BOUNDARY,
@@ -54,7 +54,7 @@ fn agy_fixture() -> String {
     s
 }
 
-/// 假 CLI 后端：把 stdin 存到 cwd，再输出一份假周报。
+/// Fake CLI backend: save stdin to cwd, then print a stub weekly report.
 fn fake_backend_script() -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("fake-backend.sh");
@@ -97,23 +97,23 @@ fn collect_end_to_end_with_day_boundary() {
         .success();
 
     let dir = out.path().join("2026-07-12_2026-07-18");
-    // 跨日边界：UTC 07-15 16:30 在 +08 是 07-16 00:30 → 落入 2026-07-16.md
+    // cross-day boundary: UTC 07-15 16:30 is 07-16 00:30 in +08 → lands in 2026-07-16.md
     let d16 = std::fs::read_to_string(dir.join("2026-07-16.md")).unwrap();
     assert!(d16.contains("跨日边界的提问"));
     assert!(d16.contains("# 2026-07-16 周四 · AI 对话记录"));
-    // claude fixture（07-16 UTC 01:01 → +08 09:01 也是 07-16）
+    // claude fixture (07-16 UTC 01:01 → 09:01 +08, also 07-16)
     assert!(d16.contains("全文搜索"));
-    // cursor fixture（内嵌 UTC+8 07-15 14:18 → 07-15）
+    // cursor fixture (embedded UTC+8 07-15 14:18 → 07-15)
     let d15 = std::fs::read_to_string(dir.join("2026-07-15.md")).unwrap();
     assert!(d15.contains("审查"));
     assert!(
         !d15.contains("跨日边界的提问"),
-        "跨日 codex 消息不应落入 07-15"
+        "cross-day codex messages must not land in 07-15"
     );
-    // gemini agy（07-14）
+    // gemini agy (07-14)
     let d14 = std::fs::read_to_string(dir.join("2026-07-14.md")).unwrap();
     assert!(d14.contains("量子蓝图"));
-    // index 汇总
+    // index totals
     let index = std::fs::read_to_string(dir.join("index.md")).unwrap();
     assert!(index.contains("[2026-07-16](2026-07-16.md)"));
     assert!(index.contains("合计"));
@@ -144,12 +144,12 @@ fn run_with_fake_cli_backend_writes_report_md() {
     let dir = out.path().join("2026-07-12_2026-07-18");
     let report = std::fs::read_to_string(dir.join("report.md")).unwrap();
     assert!(report.contains("假周报"));
-    // prompt 走了 stdin，且为 FilesManifest 模式（列文件名而非内嵌全文）
+    // prompt via stdin in FilesManifest mode (lists filenames, does not inline bodies)
     let captured = std::fs::read_to_string(dir.join("stdin-capture.txt")).unwrap();
     assert!(captured.contains("2026-07-14.md"));
     assert!(captured.contains("输入文件"));
-    assert!(!captured.contains("跨日边界的提问"), "manifest 模式不应内嵌正文");
-    assert!(captured.contains("有记录 3 天"), "stats 占位符应被替换: {captured}");
+    assert!(!captured.contains("跨日边界的提问"), "manifest mode must not inline message bodies");
+    assert!(captured.contains("有记录 3 天"), "stats placeholder should be substituted: {captured}");
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn run_api_backend_without_key_exits_1() {
         .assert()
         .failure()
         .code(1)
-        .stderr(predicate::str::contains("未设置"));
+        .stderr(predicate::str::contains("not set"));
 }
 
 #[test]
@@ -225,12 +225,12 @@ fn report_on_uncollected_dir_fails_cleanly() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("请先运行 collect"));
+        .stderr(predicate::str::contains("run collect first"));
 }
 
 #[test]
 fn report_subcommand_reads_existing_dir() {
-    // 先 collect，再 report（不重复采集）
+    // collect first, then report (no re-collect)
     let home = fake_home();
     let out = tempfile::tempdir().unwrap();
     let range_args = [

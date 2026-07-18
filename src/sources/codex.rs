@@ -1,7 +1,7 @@
-//! Codex CLI 数据源：`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`。
+//! Codex CLI data source: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
 //!
-//! 去重策略：只消费 `type == "event_msg"` 中的 `user_message` / `agent_message`，
-//! 完全忽略 `response_item`（其 message 与 event_msg 重复）。
+//! Deduplication strategy: consume only `user_message` / `agent_message` inside `type == "event_msg"`,
+//! completely ignore `response_item` (its messages duplicate event_msg).
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -64,7 +64,7 @@ impl HistorySource for CodexSource {
     }
 }
 
-/// 按 `YYYY/MM/DD` 目录名预过滤，只枚举与 range 相交的日期目录（避免全量扫描）。
+/// Pre-filter by `YYYY/MM/DD` directory names; enumerate only date dirs intersecting the range (avoids full scan).
 fn rollout_files_in_range(root: &Path, range: &DateRange) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for day in range.days() {
@@ -94,7 +94,7 @@ fn read_lines(path: &Path) -> Result<impl Iterator<Item = String>, SourceError> 
     Ok(BufReader::new(file).lines().map_while(Result::ok))
 }
 
-/// 解析结果：会话（无有效消息时为 None）+ 坏行行号（1-based）。
+/// Parse result: session (None when no valid messages) + bad line numbers (1-based).
 pub(crate) struct ParseOutcome {
     pub session: Option<Session>,
     pub bad_lines: Vec<usize>,
@@ -167,7 +167,7 @@ pub(crate) fn parse_session_lines<I: Iterator<Item = String>>(
                     content: MessageContent::Text(cap_ingest(text)),
                 });
             }
-            // response_item / turn_context / world_state / token_count 等一律忽略
+            // response_item / turn_context / world_state / token_count etc. are ignored
             _ => {}
         }
     }
@@ -192,7 +192,7 @@ pub(crate) fn parse_session_lines<I: Iterator<Item = String>>(
     }
 }
 
-/// ISO8601/RFC3339（UTC）→ 本地时区。
+/// ISO8601/RFC3339 (UTC) → local timezone.
 fn parse_iso(s: &str) -> Option<DateTime<Local>> {
     DateTime::parse_from_rfc3339(s)
         .ok()
@@ -253,14 +253,14 @@ mod tests {
 
     #[test]
     fn ignores_response_item_and_world_state_lines() {
-        // 若误解析 response_item，消息数会翻倍（fixture 中每条 event_msg 都有对应副本）
+        // if response_item were parsed, message count would double (fixture has a copy for each event_msg)
         let outcome = parse_session_lines(SAMPLE.lines().map(str::to_string), "x");
         let session = outcome.session.unwrap();
         let texts: Vec<&str> = session.messages.iter().filter_map(|m| m.text()).collect();
         assert_eq!(
             texts.iter().filter(|t| **t == "我先定位登录接口的鉴权中间件。").count(),
             1,
-            "response_item 副本被误收录"
+            "response_item duplicates must not be ingested"
         );
         assert!(!texts.iter().any(|t| t.contains("environment_context")));
         assert!(!texts.iter().any(|t| t.contains("permissions instructions")));
@@ -289,7 +289,7 @@ mod tests {
     fn source_collect_filters_sessions_outside_range() {
         let tmp = tempfile::tempdir().unwrap();
         let sessions_dir = tmp.path().join(".codex/sessions");
-        // 范围内：2026-07-15；范围外：2026-07-01 与 2026-08-01
+        // in range: 2026-07-15; out of range: 2026-07-01 and 2026-08-01
         for day in ["2026/07/15", "2026/07/01", "2026/08/01"] {
             let dir = sessions_dir.join(day);
             std::fs::create_dir_all(&dir).unwrap();

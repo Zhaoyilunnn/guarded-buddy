@@ -1,5 +1,5 @@
-//! 采集编排：从所有数据源收集会话 → 按本地日分桶（跨午夜拆分）→
-//! 写 `<out>/<range>/<date>.md` 与 `index.md`（幂等覆盖）。
+//! Collection orchestration: gather sessions from all sources → bucket by local day (midnight split) →
+//! write `<out>/<range>/<date>.md` and `index.md` (idempotent overwrite).
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -10,8 +10,8 @@ use crate::domain::{AgentKind, DateRange, Message, MessageContent, Role, Session
 use crate::render::daily::{render_daily, render_index};
 use crate::sources::{HistorySource, SourceError};
 
-/// 合并同一 (agent, id, project) 的重复会话：codex resume 会产生多个
-/// rollout 文件、消息互相重叠。消息按 (时间戳, 角色, 内容) 去重并按时间排序。
+/// Merge duplicate sessions with the same (agent, id, project): codex resume produces multiple
+/// rollout files with overlapping messages. Messages are deduplicated by (timestamp, role, content) and sorted by time.
 pub fn merge_sessions(sessions: Vec<Session>) -> Vec<Session> {
     type Key = (AgentKind, String, String);
     type MessageKey = (i64, Role, String);
@@ -55,7 +55,7 @@ pub fn merge_sessions(sessions: Vec<Session>) -> Vec<Session> {
         .collect()
 }
 
-/// 一天的桶：当日有消息的会话（每条 session 只含当日消息）。
+/// One day's bucket: sessions with messages on that day (each session contains only that day's messages).
 #[derive(Debug)]
 pub struct DayBucket {
     pub date: NaiveDate,
@@ -68,8 +68,8 @@ impl DayBucket {
     }
 }
 
-/// 纯函数：会话按消息时间戳的本地日期拆桶；范围外消息丢弃；
-/// 无范围内消息的会话不产生任何桶。
+/// Pure function: bucket sessions by local date of each message timestamp; out-of-range messages are dropped;
+/// sessions with no in-range messages produce no buckets.
 pub fn group_by_day(sessions: Vec<Session>, range: &DateRange) -> Vec<DayBucket> {
     let mut map: BTreeMap<NaiveDate, Vec<Session>> = BTreeMap::new();
     for session in sessions {
@@ -107,7 +107,7 @@ pub struct CollectOutcome {
     pub warnings: Vec<SourceError>,
 }
 
-/// 全量采集并落盘（幂等：同名文件覆盖）。
+/// Full collection and write (idempotent: overwrites same filenames).
 pub fn collect(
     sources: &[Box<dyn HistorySource>],
     range: &DateRange,
@@ -187,14 +187,14 @@ mod tests {
 
     #[test]
     fn merge_sessions_dedups_resumed_rollouts() {
-        // codex resume：同一 session_id 出现在多个 rollout 文件中，消息重叠
+        // codex resume: same session_id appears in multiple rollout files with overlapping messages
         let base = vec![
             msg("2026-07-15", "08:53", "同一个问题"),
             msg("2026-07-15", "08:54", "回答前半"),
         ];
         let resumed_extra = vec![
-            msg("2026-07-15", "08:53", "同一个问题"), // 重复
-            msg("2026-07-15", "08:54", "回答前半"),   // 重复
+            msg("2026-07-15", "08:53", "同一个问题"), // duplicate
+            msg("2026-07-15", "08:54", "回答前半"),   // duplicate
             msg("2026-07-15", "09:05", "新的追问"),
         ];
         let s1 = session("same-id", base);
@@ -213,7 +213,7 @@ mod tests {
         let s1 = session("id-a", vec![msg("2026-07-15", "08:53", "hi")]);
         let s2 = session("id-b", vec![msg("2026-07-15", "08:53", "hi")]);
         assert_eq!(merge_sessions(vec![s1, s2]).len(), 2);
-        // 同 id 但不同 project（如 gemini prompt-history 按 workspace 分组）不合并
+        // same id but different project (e.g. gemini prompt-history grouped by workspace) must not merge
         let mut s3 = session("prompt-history", vec![msg("2026-07-15", "09:00", "q1")]);
         s3.project = "/ws/a".to_string();
         let mut s4 = session("prompt-history", vec![msg("2026-07-15", "09:00", "q1")]);
@@ -243,7 +243,7 @@ mod tests {
             buckets[1].sessions[0].messages[0].text().unwrap(),
             "跨午夜的继续"
         );
-        // 每日桶内 started_at = 当日首条消息
+        // started_at in each daily bucket = first message of that day
         assert_eq!(buckets[1].sessions[0].started_at, at("2026-07-16", "00:10"));
     }
 
@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(buckets[0].sessions[1].id, "late");
     }
 
-    // ---------- collect（stub 数据源） ----------
+    // ---------- collect (stub sources) ----------
 
     struct StubSource {
         kind: AgentKind,
@@ -338,7 +338,7 @@ mod tests {
 
         let dir = tmp.path().join("2026-07-12_2026-07-18");
         assert_eq!(outcome.dir, dir);
-        // 只有有数据的日期写文件
+        // only dates with data get files
         let d15 = std::fs::read_to_string(dir.join("2026-07-15.md")).unwrap();
         assert!(d15.contains("# 2026-07-15 周三 · AI 对话记录"));
         assert!(d15.contains("codex 消息"));
@@ -346,15 +346,15 @@ mod tests {
         assert!(!d15.contains("claude 第二天"));
         let d16 = std::fs::read_to_string(dir.join("2026-07-16.md")).unwrap();
         assert!(d16.contains("claude 第二天"));
-        assert!(!dir.join("2026-07-12.md").exists(), "空日不写文件");
-        // index.md：合计行 + 警告脚注
+        assert!(!dir.join("2026-07-12.md").exists(), "empty days should not get files");
+        // index.md: totals row + warning footnote
         let index = std::fs::read_to_string(dir.join("index.md")).unwrap();
         assert!(index.contains("| 合计 | 3 | 3 |"));
         assert!(index.contains("⚠️"));
         assert!(index.contains("[2026-07-15](2026-07-15.md)"));
-        // 警告被带出
+        // warnings are surfaced
         assert_eq!(outcome.warnings.len(), 1);
-        // 幂等：再跑一遍内容一致
+        // idempotent: second run produces identical content
         let outcome2 = collect(&two_day_stubs(), &range(), tmp.path()).expect("collect ok");
         assert_eq!(
             std::fs::read_to_string(outcome2.dir.join("2026-07-15.md")).unwrap(),

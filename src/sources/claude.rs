@@ -1,8 +1,8 @@
-//! Claude Code 数据源：`~/.claude/projects/<slug>/<session-uuid>.jsonl`。
+//! Claude Code data source: `~/.claude/projects/<slug>/<session-uuid>.jsonl`.
 //!
-//! 只消费 `type == "user" | "assistant"` 的行：文本块成为 Text 消息，
-//! `tool_use` 块成为 ToolUse 消息（输入压缩为一行）；跳过 system / summary /
-//! thinking / tool_result / isMeta 等。
+//! Consumes only lines with `type == "user" | "assistant"`: text blocks become Text messages,
+//! `tool_use` blocks become ToolUse messages (input compressed to one line); skips system / summary /
+//! thinking / tool_result / isMeta etc.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -70,7 +70,7 @@ impl HistorySource for ClaudeSource {
                 });
             }
             if let Some(session) = outcome.session {
-                // 会话粒度按 started_at 粗过滤（消息粒度在 collect.rs 按天过滤）
+                // coarse session filter by started_at (message-level day filter happens in collect.rs)
                 if range.contains_ts(&session.started_at)
                     || session.messages.iter().any(|m| range.contains_ts(&m.timestamp))
                 {
@@ -180,7 +180,7 @@ pub(crate) fn parse_session_lines<I: Iterator<Item = String>>(
                                 content: MessageContent::ToolUse { name, summary },
                             });
                         }
-                        // thinking / tool_result / 其他块类型跳过
+                        // thinking / tool_result / other block types skipped
                         _ => {}
                     }
                 }
@@ -219,7 +219,7 @@ fn push_text(messages: &mut Vec<Message>, role: Role, ts: DateTime<Local>, text:
     });
 }
 
-/// ISO8601/RFC3339（UTC）→ 本地时区。
+/// ISO8601/RFC3339 (UTC) → local timezone.
 fn parse_iso(s: &str) -> Option<DateTime<Local>> {
     DateTime::parse_from_rfc3339(s)
         .ok()
@@ -305,7 +305,7 @@ mod tests {
                 .messages
                 .iter()
                 .any(|m| m.text().is_some_and(|t| t.contains("pub struct Db"))),
-            "tool_result 内容不应成为消息"
+            "tool_result content must not become a message"
         );
     }
 
@@ -317,12 +317,12 @@ mod tests {
             .messages
             .iter()
             .any(|m| m.text().is_some_and(|t| t.contains("Auto mode"))));
-        // summary 行的内容不应成为独立消息
+        // summary line content must not become a standalone message
         assert!(!session
             .messages
             .iter()
             .any(|m| m.text() == Some("为笔记应用添加全文搜索")));
-        // 消息总数：user×2 + assistant text×2 + tool_use×1 = 5
+        // message total: user×2 + assistant text×2 + tool_use×1 = 5
         assert_eq!(session.messages.len(), 5);
     }
 

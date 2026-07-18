@@ -1,7 +1,8 @@
-//! OpenAI 兼容 API 后端：POST {base_url}/chat/completions。
-//! `HttpClient` trait 是测试接缝（DIP）：单测用 mock，不引 mock crate。
+//! OpenAI-compatible API backend: POST {base_url}/chat/completions.
+//! `HttpClient` trait is the test seam (DIP): unit tests use mocks, no mock crate required.
 
 use super::{Prompt, ReportError, Summarizer};
+use crate::secrets::redact_secrets;
 
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
@@ -9,7 +10,7 @@ pub struct HttpResponse {
     pub body: String,
 }
 
-/// HTTP 抽象：测试用 mock，生产用 [`ReqwestClient`]。
+/// HTTP abstraction: mock in tests, [`ReqwestClient`] in production.
 pub trait HttpClient {
     fn post_json(
         &self,
@@ -19,7 +20,7 @@ pub trait HttpClient {
     ) -> Result<HttpResponse, ReportError>;
 }
 
-/// 生产实现：reqwest blocking + rustls。
+/// Production implementation: reqwest blocking + rustls.
 pub struct ReqwestClient {
     inner: reqwest::blocking::Client,
 }
@@ -80,16 +81,21 @@ impl<C: HttpClient> Summarizer for ApiSummarizer<C> {
     fn summarize(&self, prompt: &Prompt) -> Result<String, ReportError> {
         let key = std::env::var(&self.key_env)
             .map_err(|_| ReportError::MissingApiKey(self.key_env.clone()))?;
+        // Never persist the key; only pass it as the Authorization bearer.
+        // Redact any secrets that may still be present in collected chat text
+        // (defense in depth if older unredacted files are summarized).
+        let safe_prompt = redact_secrets(&prompt.text);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let body = serde_json::json!({
             "model": self.model,
-            "messages": [{"role": "user", "content": prompt.text}],
+            "messages": [{"role": "user", "content": safe_prompt}],
         });
         let resp = self.client.post_json(&url, &key, &body)?;
         if !(200..300).contains(&resp.status) {
             return Err(ReportError::ApiStatus {
                 status: resp.status,
-                body: resp.body,
+                // Error bodies can echo credentials; never print them raw.
+                body: redact_secrets(&resp.body),
             });
         }
         let doc: serde_json::Value =
@@ -102,7 +108,7 @@ impl<C: HttpClient> Summarizer for ApiSummarizer<C> {
             .and_then(|c| c.as_str())
             .map(str::to_string)
             .ok_or_else(|| {
-                ReportError::ApiParse("响应缺少 choices[0].message.content".to_string())
+                ReportError::ApiParse("response missing choices[0].message.content".to_string())
             })
     }
 }
@@ -165,8 +171,8 @@ mod tests {
         }
     }
 
-    /// 每个测试用独立的环境变量名，避免并行测试互相覆盖（edition 2024 下
-    /// set_var 为 unsafe，仅在子作用域内使用）。
+    /// Each test uses a unique env var name to avoid parallel test interference (edition 2024
+    /// makes set_var unsafe; use only within a scoped block).
     fn set_unique_env(name: &str, value: &str) {
         unsafe { std::env::set_var(name, value) };
     }
@@ -197,7 +203,7 @@ mod tests {
         );
         let api = ApiSummarizer::new(
             mock,
-            "https://api.example.com/v1/".to_string(), // 尾部斜杠应被处理
+            "https://api.example.com/v1/".to_string(), // trailing slash should be normalized
             "AIW_TEST_KEY_SUCCESS".to_string(),
             "deepseek-chat".to_string(),
         );
@@ -232,6 +238,33 @@ mod tests {
             }
             other => panic!("expected ApiStatus, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn redacts_secrets_in_prompt_and_error_bodies() {
+        set_unique_env("AIW_TEST_KEY_REDACT", "sk-x");
+        let leaked = "sk-abcdefghijklmnopqrstuvwxyz012345";
+        let mock = MockHttp::failing(401, &format!(r#"{{"error":"bad key {leaked}"}}"#));
+        let api = ApiSummarizer::new(
+            mock,
+            "https://api.example.com/v1".to_string(),
+            "AIW_TEST_KEY_REDACT".to_string(),
+            "m".to_string(),
+        );
+        let err = api
+            .summarize(&prompt(&format!("please use {leaked}")))
+            .unwrap_err();
+        match err {
+            ReportError::ApiStatus { body, .. } => {
+                assert!(!body.contains(leaked), "error body must redact secrets: {body}");
+                assert!(body.contains("[REDACTED]"));
+            }
+            other => panic!("expected ApiStatus, got {other:?}"),
+        }
+        let captured = api.client.captured.lock().unwrap();
+        let content = captured[0].2["messages"][0]["content"].as_str().unwrap();
+        assert!(!content.contains(leaked));
+        assert!(content.contains("[REDACTED]"));
     }
 
     #[test]
