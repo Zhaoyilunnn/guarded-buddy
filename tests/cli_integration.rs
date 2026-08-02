@@ -281,6 +281,60 @@ fn report_subcommand_schedules_background() {
 }
 
 #[test]
+fn mail_sends_existing_report_with_fake_mutt() {
+    let report_dir = tempfile::tempdir().unwrap();
+    let range_dir = report_dir.path().join("2026-07-12_2026-07-18");
+    std::fs::create_dir_all(&range_dir).unwrap();
+    let report = range_dir.join("report.md");
+    std::fs::write(&report, "# weekly\n").unwrap();
+
+    let bin = tempfile::tempdir().unwrap();
+    let mutt = bin.path().join("mutt");
+    std::fs::write(
+        &mutt,
+        "#!/bin/sh\nif [ \"$1\" = \"-v\" ]; then exit 0; fi\ncat > /dev/null\nexit 0\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&mutt, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut paths = vec![bin.path().to_path_buf()];
+    if let Some(old) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&old));
+    }
+    let path = std::env::join_paths(paths).unwrap();
+
+    base_cmd()
+        .env("PATH", &path)
+        .args([
+            "mail",
+            report.to_str().unwrap(),
+            "--mail-to",
+            "a@example.com",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Emailed"));
+}
+
+#[test]
+fn mail_missing_report_fails() {
+    base_cmd()
+        .args([
+            "mail",
+            "/nonexistent/aiw-report.md",
+            "--mail-to",
+            "a@example.com",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+}
+
+#[test]
 fn sources_lists_detected_and_missing() {
     let home = tempfile::tempdir().unwrap();
     write(

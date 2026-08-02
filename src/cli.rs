@@ -27,6 +27,8 @@ pub enum Command {
     Report(ReportArgs),
     /// collect + report in one step
     Run(RunArgs),
+    /// Email an existing report.md via mutt (retry after a failed send)
+    Mail(MailArgs),
     /// List data sources detected on this machine
     Sources(SourcesArgs),
 }
@@ -51,6 +53,15 @@ pub struct RunArgs {
     pub common: CommonArgs,
     #[command(flatten)]
     pub backend: BackendArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct MailArgs {
+    /// Path to an existing report.md
+    pub report: PathBuf,
+    /// Recipients (comma-separated); overrides config
+    #[arg(long, value_delimiter = ',')]
+    pub mail_to: Option<Vec<String>>,
 }
 
 #[derive(Debug, Args)]
@@ -208,6 +219,13 @@ pub fn resolve_common(
         include_prompt_history: common.include_prompt_history
             || config.include_prompt_history.unwrap_or(false),
     })
+}
+
+/// Resolve mail recipients: CLI flag > config. Empty means unset.
+pub fn resolve_mail_to(cli: &Option<Vec<String>>, config: &Config) -> Vec<String> {
+    cli.clone()
+        .or_else(|| config.mail_to.clone())
+        .unwrap_or_default()
 }
 
 /// Merge summarization backend options.
@@ -625,6 +643,47 @@ mod tests {
     fn sources_subcommand_parses() {
         let cli = Cli::try_parse_from(["ai-weekly-report", "sources"]).unwrap();
         assert!(matches!(cli.command, Command::Sources(_)));
+    }
+
+    #[test]
+    fn parses_mail_with_report_path_and_recipients() {
+        let cli = Cli::try_parse_from([
+            "ai-weekly-report",
+            "mail",
+            "out/2026-07-12_2026-07-18/report.md",
+            "--mail-to",
+            "a@example.com,b@example.com",
+        ])
+        .unwrap();
+        let Command::Mail(args) = cli.command else {
+            panic!("expected mail")
+        };
+        assert_eq!(
+            args.report,
+            PathBuf::from("out/2026-07-12_2026-07-18/report.md")
+        );
+        assert_eq!(
+            args.mail_to.as_deref(),
+            Some(["a@example.com".to_string(), "b@example.com".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn resolve_mail_to_flag_over_config_standalone() {
+        use super::resolve_mail_to;
+        let config = Config {
+            mail_to: Some(vec!["cfg@example.com".to_string()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_mail_to(&None, &config),
+            vec!["cfg@example.com".to_string()]
+        );
+        assert_eq!(
+            resolve_mail_to(&Some(vec!["cli@example.com".to_string()]), &config),
+            vec!["cli@example.com".to_string()]
+        );
+        assert!(resolve_mail_to(&None, &Config::default()).is_empty());
     }
 
     #[test]

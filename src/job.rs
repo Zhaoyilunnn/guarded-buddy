@@ -4,6 +4,8 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use chrono::NaiveDate;
+
 use crate::cli::{BackendKind, EffectiveBackend, EffectiveCommon};
 use crate::domain::DateRange;
 
@@ -115,4 +117,42 @@ pub fn spawn_report_worker(
 /// Build the email subject line for a date range.
 pub fn mail_subject(range: &DateRange) -> String {
     format!("AI weekly report {} ~ {}", range.start, range.end)
+}
+
+/// Subject for an existing report file: parse parent dir `YYYY-MM-DD_YYYY-MM-DD` when present.
+pub fn mail_subject_for_report_path(report_path: &Path) -> String {
+    let parent_name = report_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    if let Some((start, end)) = parent_name.split_once('_')
+        && NaiveDate::parse_from_str(start, "%Y-%m-%d").is_ok()
+        && NaiveDate::parse_from_str(end, "%Y-%m-%d").is_ok()
+    {
+        return format!("AI weekly report {start} ~ {end}");
+    }
+    "AI weekly report".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mail_subject_for_report_path;
+    use std::path::Path;
+
+    #[test]
+    fn subject_from_range_parent_dir() {
+        assert_eq!(
+            mail_subject_for_report_path(Path::new("out/2026-07-12_2026-07-18/report.md")),
+            "AI weekly report 2026-07-12 ~ 2026-07-18"
+        );
+    }
+
+    #[test]
+    fn subject_fallback_when_parent_not_a_range() {
+        assert_eq!(
+            mail_subject_for_report_path(Path::new("/tmp/report.md")),
+            "AI weekly report"
+        );
+    }
 }

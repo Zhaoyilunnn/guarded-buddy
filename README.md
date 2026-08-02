@@ -8,7 +8,7 @@ Generate weekly AI coding-assistant conversation reports in one command. Reads l
 - **report** / **run**: Collect (run only) then **schedule summarization in the background**. The foreground process exits immediately after spawning a detached worker that writes `out/<range>/report.md` (progress in `report.log`). Two backends:
   - **CLI**: Invokes locally installed `codex` / `claude` / `agy` / `gemini` (non-interactive; prompt via stdin or args; working directory set to the records directory so the tool reads files itself)
   - **API**: Built-in OpenAI-compatible client (`POST {base_url}/chat/completions`), embeds full text (budgeted), reads API key from environment variables
-- Optional **email** via `mutt` after a successful `report.md` (`mail_to` / `--mail-to`)
+- Optional **email** via `mutt` after a successful `report.md` (`mail_to` / `--mail-to`); **`mail <report.md>`** retries send without regenerating
 - Custom report template (`--template`) with placeholders `{{start_date}}` `{{end_date}}` `{{stats}}` `{{daily_notes}}`
 
 ## Install
@@ -49,6 +49,10 @@ ai-weekly-report run --backend api \
 # Email the finished report with mutt (requires mutt installed + configured)
 ai-weekly-report run --mail-to you@example.com,team@example.com
 
+# Retry email only (after mutt failed, e.g. /tmp full) — path to existing report.md
+ai-weekly-report mail out/2026-07-12_2026-07-18/report.md
+ai-weekly-report mail out/2026-07-12_2026-07-18/report.md --mail-to you@example.com
+
 # Custom template / filter agents / include agy prompt history
 ai-weekly-report run --template my-template.md --agents codex,claude
 ai-weekly-report collect --include-prompt-history
@@ -75,7 +79,7 @@ api_model = "gpt-4o-mini"
 # mail_to = ["you@example.com", "team@example.com"]
 ```
 
-Email is skipped when `mail_to` / `--mail-to` is empty. If recipients are set but `mutt` is missing, the tool prints a one-line hint and still writes `report.md`.
+Email is skipped when `mail_to` / `--mail-to` is empty during `report`/`run`. If recipients are set but `mutt` is missing, the tool prints a one-line hint and still writes `report.md`. Use `mail <path-to-report.md>` to retry sending without regenerating.
 
 ## Security
 

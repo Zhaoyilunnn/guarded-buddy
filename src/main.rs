@@ -5,7 +5,7 @@ use std::path::Path;
 use ai_weekly_report::app;
 use ai_weekly_report::cli::{self, Cli, Command};
 use ai_weekly_report::config::Config;
-use ai_weekly_report::job::{self, mail_subject};
+use ai_weekly_report::job::{self, mail_subject, mail_subject_for_report_path};
 use ai_weekly_report::mail::{self, mutt_available, mutt_missing_hint};
 use ai_weekly_report::sources::default_sources;
 use anyhow::Context;
@@ -56,6 +56,9 @@ fn main() -> anyhow::Result<()> {
                 print_collect_result(&outcome);
                 schedule_report(&common, &backend, &outcome.dir)?;
             }
+        }
+        Command::Mail(args) => {
+            send_mail_only(&args.report, &cli::resolve_mail_to(&args.mail_to, &config))?;
         }
     }
     Ok(())
@@ -133,5 +136,29 @@ fn run_worker(
         ),
         Err(e) => eprintln!("worker: mail failed (report.md kept): {e}"),
     }
+    Ok(())
+}
+
+/// Retry sending an already-written report.md (foreground; fails hard on mail errors).
+fn send_mail_only(report_path: &Path, mail_to: &[String]) -> anyhow::Result<()> {
+    if !report_path.is_file() {
+        anyhow::bail!(
+            "report file not found: {} (generate it with report/run first)",
+            report_path.display()
+        );
+    }
+    if mail_to.is_empty() {
+        anyhow::bail!("no recipients: set --mail-to or mail_to in config.toml");
+    }
+    if !mutt_available() {
+        anyhow::bail!("{}", mutt_missing_hint());
+    }
+    let subject = mail_subject_for_report_path(report_path);
+    mail::send_report_with_mutt(mail_to, &subject, report_path)?;
+    println!(
+        "Emailed {} to {}",
+        report_path.display(),
+        mail_to.join(", ")
+    );
     Ok(())
 }
