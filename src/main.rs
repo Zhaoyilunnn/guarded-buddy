@@ -20,7 +20,7 @@ use clap_complete::generate;
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let default_home = dirs::home_dir().context("unable to determine $HOME directory")?;
-    let config = Config::load_for_home(&default_home)?;
+    let config = Config::load(&Config::default_path(&default_home))?;
     let today = Local::now().date_naive();
 
     match cli.command {
@@ -52,11 +52,8 @@ fn main() -> anyhow::Result<()> {
             }
             WrCommand::Report(args) => {
                 let common = cli::resolve_common(&args.common, &config, today, &default_home)?;
-                let backend = cli::resolve_backend(
-                    &args.backend,
-                    &config,
-                    config.effective_wr_mail_to(),
-                )?;
+                let backend =
+                    cli::resolve_backend(&args.backend, &config, config.wr.mail_to.as_deref())?;
                 let dir = common.out_dir.join(common.range.dir_name());
                 if backend.worker {
                     run_wr_worker(&backend, &dir, &common.range)?;
@@ -66,11 +63,8 @@ fn main() -> anyhow::Result<()> {
             }
             WrCommand::Run(args) => {
                 let common = cli::resolve_common(&args.common, &config, today, &default_home)?;
-                let backend = cli::resolve_backend(
-                    &args.backend,
-                    &config,
-                    config.effective_wr_mail_to(),
-                )?;
+                let backend =
+                    cli::resolve_backend(&args.backend, &config, config.wr.mail_to.as_deref())?;
                 if backend.worker {
                     let dir = common.out_dir.join(common.range.dir_name());
                     run_wr_worker(&backend, &dir, &common.range)?;
@@ -81,7 +75,7 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             WrCommand::Mail(args) => {
-                let to = cli::resolve_mail_to(&args.mail_to, config.effective_wr_mail_to());
+                let to = cli::resolve_mail_to(&args.mail_to, config.wr.mail_to.as_deref());
                 send_mail_only(&args.report, &to)?;
             }
         },

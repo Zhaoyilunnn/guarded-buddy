@@ -1,8 +1,11 @@
 //! End-to-end integration tests for `buddy`.
+//!
+//! Config is isolated via a temporary `HOME` so tests never read
+//! `~/.config/buddy/config.toml` or email real recipients via mutt.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 const CLAUDE_SAMPLE: &str = include_str!("fixtures/claude/session-sample.jsonl");
@@ -85,10 +88,14 @@ EOF
     (tmp, path)
 }
 
-fn base_cmd() -> Command {
+/// Empty config HOME (no `~/.config/buddy`) + chat `--home` stays separate.
+/// Keep the returned TempDir alive for the whole test (including detached workers).
+fn base_cmd() -> (tempfile::TempDir, Command) {
+    let config_home = tempfile::tempdir().unwrap();
     let mut cmd = Command::cargo_bin("buddy").unwrap();
     cmd.env("TZ", "Asia/Shanghai");
-    cmd
+    cmd.env("HOME", config_home.path());
+    (config_home, cmd)
 }
 
 fn wait_for_file(path: &Path, timeout: Duration) -> String {
@@ -109,23 +116,23 @@ fn wait_for_file(path: &Path, timeout: Duration) -> String {
 
 #[test]
 fn collect_end_to_end_with_day_boundary() {
+    let (_cfg, mut cmd) = base_cmd();
     let home = fake_home();
     let out = tempfile::tempdir().unwrap();
-    base_cmd()
-        .args([
-            "wr",
-            "collect",
-            "--from",
-            "2026-07-12",
-            "--to",
-            "2026-07-18",
-            "--home",
-            home.path().to_str().unwrap(),
-            "--out",
-            out.path().to_str().unwrap(),
-        ])
-        .assert()
-        .success();
+    cmd.args([
+        "wr",
+        "collect",
+        "--from",
+        "2026-07-12",
+        "--to",
+        "2026-07-18",
+        "--home",
+        home.path().to_str().unwrap(),
+        "--out",
+        out.path().to_str().unwrap(),
+    ])
+    .assert()
+    .success();
 
     let dir = out.path().join("2026-07-12_2026-07-18");
     let d16 = std::fs::read_to_string(dir.join("2026-07-16.md")).unwrap();
@@ -134,31 +141,33 @@ fn collect_end_to_end_with_day_boundary() {
 
 #[test]
 fn wr_run_schedules_background() {
+    let (_cfg, mut cmd) = base_cmd();
     let home = fake_home();
     let out = tempfile::tempdir().unwrap();
     let (_t, script) = fake_backend_script();
-    base_cmd()
-        .args([
-            "wr",
-            "run",
-            "--from",
-            "2026-07-12",
-            "--to",
-            "2026-07-18",
-            "--home",
-            home.path().to_str().unwrap(),
-            "--out",
-            out.path().to_str().unwrap(),
-            "--cmd",
-            script.to_str().unwrap(),
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Summarization started in background"));
+    cmd.args([
+        "wr",
+        "run",
+        "--from",
+        "2026-07-12",
+        "--to",
+        "2026-07-18",
+        "--home",
+        home.path().to_str().unwrap(),
+        "--out",
+        out.path().to_str().unwrap(),
+        "--cmd",
+        script.to_str().unwrap(),
+    ])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Summarization started in background"));
 
     let dir = out.path().join("2026-07-12_2026-07-18");
     let report = wait_for_file(&dir.join("report.md"), Duration::from_secs(10));
     assert!(report.contains("假周报"));
+    // No mail_to in isolated config → worker must not create a mail attempt that needs mutt.
+    // (If real config leaked, mutt could fire; isolation is the guard.)
 }
 
 #[test]
@@ -175,13 +184,15 @@ fn wr_report_worker_writes_report_md() {
         "--out",
         out.path().to_str().unwrap(),
     ];
-    base_cmd()
+    let (_cfg1, mut collect) = base_cmd();
+    collect
         .args(["wr", "collect"])
         .args(range_args)
         .assert()
         .success();
     let (_t, script) = fake_backend_script();
-    base_cmd()
+    let (_cfg2, mut report_cmd) = base_cmd();
+    report_cmd
         .args(["wr", "report", "--worker"])
         .args(range_args)
         .args(["--cmd", script.to_str().unwrap()])
@@ -194,70 +205,69 @@ fn wr_report_worker_writes_report_md() {
 
 #[test]
 fn wr_api_without_key_exits_1() {
+    let (_cfg, mut cmd) = base_cmd();
     let home = fake_home();
     let out = tempfile::tempdir().unwrap();
-    base_cmd()
-        .args([
-            "wr",
-            "run",
-            "--from",
-            "2026-07-12",
-            "--to",
-            "2026-07-18",
-            "--home",
-            home.path().to_str().unwrap(),
-            "--out",
-            out.path().to_str().unwrap(),
-            "--backend",
-            "api",
-            "--api-key-env",
-            "AIW_IT_DEFINITELY_MISSING_KEY",
-        ])
-        .env_remove("AIW_IT_DEFINITELY_MISSING_KEY")
-        .assert()
-        .failure()
-        .code(1)
-        .stderr(predicate::str::contains("not set"));
+    cmd.args([
+        "wr",
+        "run",
+        "--from",
+        "2026-07-12",
+        "--to",
+        "2026-07-18",
+        "--home",
+        home.path().to_str().unwrap(),
+        "--out",
+        out.path().to_str().unwrap(),
+        "--backend",
+        "api",
+        "--api-key-env",
+        "AIW_IT_DEFINITELY_MISSING_KEY",
+    ])
+    .env_remove("AIW_IT_DEFINITELY_MISSING_KEY")
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("not set"));
 }
 
 #[test]
 fn wr_mail_missing_report_fails() {
-    base_cmd()
-        .args([
-            "wr",
-            "mail",
-            "/nonexistent/aiw-report.md",
-            "--mail-to",
-            "a@example.com",
-        ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("not found"));
+    let (_cfg, mut cmd) = base_cmd();
+    cmd.args([
+        "wr",
+        "mail",
+        "/nonexistent/aiw-report.md",
+        "--mail-to",
+        "a@example.com",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not found"));
 }
 
 #[test]
 fn signoff_plan_with_fake_llm() {
+    let (_cfg, mut cmd) = base_cmd();
     let home = fake_home();
     let out = tempfile::tempdir().unwrap();
     let (_t, script) = fake_plan_script();
-    base_cmd()
-        .args([
-            "signoff",
-            "plan",
-            "--home",
-            home.path().to_str().unwrap(),
-            "--out",
-            out.path().to_str().unwrap(),
-            "--cmd",
-            script.to_str().unwrap(),
-            "--window-hours",
-            "876000",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Signoff plan"));
+    cmd.args([
+        "signoff",
+        "plan",
+        "--home",
+        home.path().to_str().unwrap(),
+        "--out",
+        out.path().to_str().unwrap(),
+        "--cmd",
+        script.to_str().unwrap(),
+        "--window-hours",
+        "876000",
+    ])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Signoff plan"));
 
-    // Find the signoff day dir
     let signoff_root = out.path().join("signoff");
     let day_dir = std::fs::read_dir(&signoff_root)
         .unwrap()
@@ -271,8 +281,8 @@ fn signoff_plan_with_fake_llm() {
 
 #[test]
 fn completions_bash_emits_script() {
-    base_cmd()
-        .args(["completions", "bash"])
+    let (_cfg, mut cmd) = base_cmd();
+    cmd.args(["completions", "bash"])
         .assert()
         .success()
         .stdout(predicate::str::contains("buddy"));
@@ -280,13 +290,13 @@ fn completions_bash_emits_script() {
 
 #[test]
 fn sources_lists_detected_and_missing() {
+    let (_cfg, mut cmd) = base_cmd();
     let home = tempfile::tempdir().unwrap();
     write(
         &home.path().join(".claude/projects/p/s.jsonl"),
         CLAUDE_SAMPLE,
     );
-    base_cmd()
-        .args(["wr", "sources", "--home", home.path().to_str().unwrap()])
+    cmd.args(["wr", "sources", "--home", home.path().to_str().unwrap()])
         .assert()
         .success()
         .stdout(predicate::str::contains("✓ Claude Code"))
@@ -295,6 +305,7 @@ fn sources_lists_detected_and_missing() {
 
 #[test]
 fn mail_sends_with_fake_mutt() {
+    let (_cfg, mut cmd) = base_cmd();
     let report_dir = tempfile::tempdir().unwrap();
     let range_dir = report_dir.path().join("2026-07-12_2026-07-18");
     std::fs::create_dir_all(&range_dir).unwrap();
@@ -319,8 +330,7 @@ fn mail_sends_with_fake_mutt() {
     }
     let path = std::env::join_paths(paths).unwrap();
 
-    base_cmd()
-        .env("PATH", &path)
+    cmd.env("PATH", &path)
         .args([
             "wr",
             "mail",

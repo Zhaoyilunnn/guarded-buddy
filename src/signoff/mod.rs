@@ -40,7 +40,7 @@ impl Default for SignoffSettings {
             mail_to: Vec::new(),
             allowed_workspaces: Vec::new(),
             max_auto_todos: 3,
-            act_timeout_secs: 1800,
+            act_timeout_secs: 7200,
             dry_run: false,
             min_confidence: 0.8,
             out_dir: PathBuf::from("out"),

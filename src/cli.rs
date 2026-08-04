@@ -227,7 +227,7 @@ pub fn resolve_common(
     let range = match (common.range.from, common.range.to) {
         (Some(from), Some(to)) => DateRange::new(from, to)?,
         (None, None) => {
-            let days = common.range.days.or(config.effective_wr_days()).unwrap_or(7);
+            let days = common.range.days.or(config.wr.days).unwrap_or(7);
             DateRange::last_n_days(days, today)
         }
         _ => return Err(CliError::MissingRangeBound),
@@ -256,7 +256,7 @@ pub fn resolve_common(
         home,
         agents,
         include_prompt_history: common.include_prompt_history
-            || config.effective_wr_include_prompt_history(),
+            || config.wr.include_prompt_history.unwrap_or(false),
     })
 }
 
@@ -269,7 +269,7 @@ pub fn resolve_backend(
     let kind = match args
         .backend
         .as_deref()
-        .or(config.effective_llm_backend())
+        .or(config.llm.backend.as_deref())
         .unwrap_or("cli")
     {
         "cli" => BackendKind::Cli,
@@ -286,34 +286,32 @@ pub fn resolve_backend(
         cli_name: args
             .cli_name
             .clone()
-            .or_else(|| config.effective_cli_name().map(str::to_string))
+            .or_else(|| config.llm.cli_name.clone())
             .unwrap_or_else(|| "claude".to_string()),
-        cli_cmd: args
-            .cmd
-            .clone()
-            .or_else(|| config.effective_cli_cmd().map(str::to_string)),
+        cli_cmd: args.cmd.clone().or_else(|| config.llm.cli_cmd.clone()),
         template: args
             .template
             .clone()
-            .or_else(|| config.effective_wr_template().map(PathBuf::from)),
+            .or_else(|| config.wr.template.clone())
+            .or_else(|| config.llm.template.clone()),
         api_base_url: args
             .base_url
             .clone()
-            .or_else(|| config.effective_api_base_url().map(str::to_string))
+            .or_else(|| config.llm.api_base_url.clone())
             .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
         api_key_env: args
             .api_key_env
             .clone()
-            .or_else(|| config.effective_api_key_env().map(str::to_string))
+            .or_else(|| config.llm.api_key_env.clone())
             .unwrap_or_else(|| "OPENAI_API_KEY".to_string()),
         api_model: args
             .model
             .clone()
-            .or_else(|| config.effective_api_model().map(str::to_string))
+            .or_else(|| config.llm.api_model.clone())
             .unwrap_or_else(|| "gpt-4o-mini".to_string()),
         timeout_secs: args
             .timeout_secs
-            .or(config.effective_timeout_secs())
+            .or(config.llm.timeout_secs)
             .unwrap_or(600),
         mail_to,
         worker: args.worker,
@@ -353,7 +351,7 @@ pub fn resolve_signoff_settings(
             .map(PathBuf::from)
             .collect(),
         max_auto_todos: conf.max_auto_todos.unwrap_or(3),
-        act_timeout_secs: conf.act_timeout_secs.unwrap_or(1800),
+        act_timeout_secs: conf.act_timeout_secs.unwrap_or(7200),
         dry_run: args.dry_run || conf.dry_run.unwrap_or(false),
         min_confidence,
         out_dir: args
@@ -440,7 +438,7 @@ mod tests {
         let eff = resolve_backend(
             &BackendArgs::default(),
             &config,
-            config.effective_wr_mail_to(),
+            config.wr.mail_to.as_deref(),
         )
         .unwrap();
         assert_eq!(eff.mail_to, vec!["w@example.com".to_string()]);

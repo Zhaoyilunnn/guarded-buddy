@@ -55,7 +55,7 @@ eval "$(buddy completions bash)"   # optional
 
 ## Configuration
 
-`~/.config/buddy/config.toml` (falls back to legacy `~/.config/ai-weekly-report/config.toml`).
+`~/.config/buddy/config.toml`
 
 ```toml
 out_dir = "out"
@@ -71,31 +71,14 @@ mail_to = ["weekly@example.com"]
 
 [signoff]
 window_hours = 24
-mail_to = ["me@personal.com"]
+mail_to = ["me@example.com"]
 allowed_workspaces = ["/home/you/proj-a", "/home/you/proj-b"]
 max_auto_todos = 3
-act_timeout_secs = 1800
+act_timeout_secs = 7200
 dry_run = false
 ```
 
 Priority: **CLI flag > config > defaults**. `wr` and `signoff` use **separate** `mail_to` lists.
-
-## Security
-
-- API keys only via env var names (`api_key_env`).  
-- Secret redaction in collected Markdown / prompts / errors.  
-- Signoff **Act** is allowlist-gated; ambiguous todos stay in `needs_human`.
-
-## Migration from ai-weekly-report
-
-| Old | New |
-|---|---|
-| `ai-weekly-report run` | `buddy wr run` |
-| `ai-weekly-report collect` | `buddy wr collect` |
-| `ai-weekly-report report` | `buddy wr report` |
-| `ai-weekly-report mail …` | `buddy wr mail …` |
-| `ai-weekly-report sources` | `buddy wr sources` |
-| `~/.config/ai-weekly-report/` | `~/.config/buddy/` (legacy still read) |
 
 ## Development
 
