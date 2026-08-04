@@ -1,4 +1,4 @@
-//! ai-weekly-report: library for aggregating AI coding-assistant conversation history and generating weekly reports.
+//! buddy: a guarded assistant — weekly reports (`wr`) and end-of-day `signoff`.
 
 pub mod app;
 pub mod cli;
@@ -10,5 +10,6 @@ pub mod mail;
 pub mod render;
 pub mod report;
 pub mod secrets;
+pub mod signoff;
 pub mod sources;
 pub mod template;

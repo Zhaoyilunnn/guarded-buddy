@@ -1,12 +1,19 @@
 [package]
-name = "ai-weekly-report"
+name = "buddy"
 version = "0.1.0"
 edition = "2024"
+description = "A guarded buddy — agents on a leash for weekly reports and signoff"
+license = "MIT"
+
+[[bin]]
+name = "buddy"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.103"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.2", features = ["derive"] }
+clap_complete = "4.5"
 dirs = "6.0.0"
 libc = "0.2"
 regex = "1.13.1"

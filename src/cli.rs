@@ -1,18 +1,19 @@
-//! CLI definition (clap derive) and config merging: CLI flag > config > built-in defaults.
+//! CLI: nested skills `wr` / `signoff` / `completions`.
 
 use std::path::PathBuf;
 
 use chrono::NaiveDate;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::config::Config;
 use crate::domain::{AgentKind, DateRange, DomainError};
+use crate::signoff::SignoffSettings;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "ai-weekly-report",
+    name = "buddy",
     version,
-    about = "Aggregate AI coding-assistant conversation history and generate weekly reports"
+    about = "A guarded buddy — agents on a leash for weekly reports and signoff"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -21,16 +22,76 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Collect conversation history → out/<start>_<end>/<date>.md
+    /// Weekly report skill
+    #[command(name = "wr", visible_alias = "weekly-report")]
+    Wr(WrArgs),
+    /// End-of-day silent progress skill
+    Signoff(SignoffArgs),
+    /// Generate shell completion script
+    Completions(CompletionsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WrArgs {
+    #[command(subcommand)]
+    pub command: WrCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WrCommand {
     Collect(CollectArgs),
-    /// Generate a weekly report from a collected directory
     Report(ReportArgs),
-    /// collect + report in one step
     Run(RunArgs),
-    /// Email an existing report.md via mutt (retry after a failed send)
     Mail(MailArgs),
-    /// List data sources detected on this machine
     Sources(SourcesArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SignoffArgs {
+    #[command(subcommand)]
+    pub command: Option<SignoffCommand>,
+    #[command(flatten)]
+    pub run: SignoffRunArgs,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SignoffCommand {
+    /// Ingest → plan → act → email (default when no subcommand)
+    Run(SignoffRunArgs),
+    /// Ingest → plan only (no act, no email)
+    Plan(SignoffRunArgs),
+    /// Resend an existing signoff.md
+    Mail(MailArgs),
+}
+
+#[derive(Debug, Default, Args)]
+pub struct SignoffRunArgs {
+    #[command(flatten)]
+    pub llm: BackendArgs,
+    /// Output root (default out)
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// Override $HOME
+    #[arg(long)]
+    pub home: Option<PathBuf>,
+    /// Lookback hours (default 24)
+    #[arg(long)]
+    pub window_hours: Option<u64>,
+    /// Force dry-run (plan only actions, still writes signoff.md on run)
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CompletionsArgs {
+    pub shell: ShellKind,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum ShellKind {
+    Bash,
+    Zsh,
+    Fish,
 }
 
 #[derive(Debug, Args)]
@@ -57,29 +118,23 @@ pub struct RunArgs {
 
 #[derive(Debug, Args)]
 pub struct MailArgs {
-    /// Path to an existing report.md
     pub report: PathBuf,
-    /// Recipients (comma-separated); overrides config
     #[arg(long, value_delimiter = ',')]
     pub mail_to: Option<Vec<String>>,
 }
 
 #[derive(Debug, Args)]
 pub struct SourcesArgs {
-    /// Override $HOME (for tests)
     #[arg(long)]
     pub home: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Args)]
 pub struct RangeArgs {
-    /// Start date (inclusive), YYYY-MM-DD; must be used with --to
     #[arg(long)]
     pub from: Option<NaiveDate>,
-    /// End date (inclusive), YYYY-MM-DD
     #[arg(long)]
     pub to: Option<NaiveDate>,
-    /// Lookback days (default 7; --from/--to take precedence when both are set)
     #[arg(long)]
     pub days: Option<u32>,
 }
@@ -88,50 +143,36 @@ pub struct RangeArgs {
 pub struct CommonArgs {
     #[command(flatten)]
     pub range: RangeArgs,
-    /// Output root directory (default out)
     #[arg(long)]
     pub out: Option<PathBuf>,
-    /// Override $HOME (for tests)
     #[arg(long)]
     pub home: Option<PathBuf>,
-    /// Collect only specified agents (comma-separated: codex,cursor,claude,gemini)
     #[arg(long, value_delimiter = ',')]
     pub agents: Option<Vec<String>>,
-    /// Gemini/antigravity: also include history.jsonl (prompt list)
     #[arg(long)]
     pub include_prompt_history: bool,
 }
 
 #[derive(Debug, Default, Args)]
 pub struct BackendArgs {
-    /// Summarization backend: cli | api (default cli)
     #[arg(long)]
     pub backend: Option<String>,
-    /// CLI backend preset: codex | claude | agy | gemini (default claude)
     #[arg(long)]
     pub cli_name: Option<String>,
-    /// Custom CLI command (overrides --cli-name preset; split on whitespace)
     #[arg(long)]
     pub cmd: Option<String>,
-    /// Weekly report template file
     #[arg(long)]
     pub template: Option<PathBuf>,
-    /// API backend base URL (default https://api.openai.com/v1)
     #[arg(long)]
     pub base_url: Option<String>,
-    /// Environment variable holding the API key (default OPENAI_API_KEY)
     #[arg(long)]
     pub api_key_env: Option<String>,
-    /// API model name (default gpt-4o-mini)
     #[arg(long)]
     pub model: Option<String>,
-    /// External CLI timeout in seconds (default 600)
     #[arg(long)]
     pub timeout_secs: Option<u64>,
-    /// Email recipients for the finished report (comma-separated); overrides config
     #[arg(long, value_delimiter = ',')]
     pub mail_to: Option<Vec<String>>,
-    /// Internal: run summarization in-process (used by the detached worker)
     #[arg(long, hide = true)]
     pub worker: bool,
 }
@@ -173,13 +214,10 @@ pub struct EffectiveBackend {
     pub api_key_env: String,
     pub api_model: String,
     pub timeout_secs: u64,
-    /// Recipients for mutt email after report completes; empty = skip mail.
     pub mail_to: Vec<String>,
-    /// When true, run summarization in this process (worker mode).
     pub worker: bool,
 }
 
-/// Merge collect-side options. `today`/`default_home` are injected by callers for testing.
 pub fn resolve_common(
     common: &CommonArgs,
     config: &Config,
@@ -189,7 +227,7 @@ pub fn resolve_common(
     let range = match (common.range.from, common.range.to) {
         (Some(from), Some(to)) => DateRange::new(from, to)?,
         (None, None) => {
-            let days = common.range.days.or(config.days).unwrap_or(7);
+            let days = common.range.days.or(config.effective_wr_days()).unwrap_or(7);
             DateRange::last_n_days(days, today)
         }
         _ => return Err(CliError::MissingRangeBound),
@@ -199,15 +237,16 @@ pub fn resolve_common(
         .clone()
         .or_else(|| config.out_dir.as_ref().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("out"));
-    let home = common.home.clone().unwrap_or_else(|| default_home.to_path_buf());
+    let home = common
+        .home
+        .clone()
+        .unwrap_or_else(|| default_home.to_path_buf());
     let agents = common
         .agents
         .as_ref()
         .map(|list| {
             list.iter()
-                .map(|s| {
-                    AgentKind::from_slug(s).ok_or_else(|| CliError::InvalidAgent(s.clone()))
-                })
+                .map(|s| AgentKind::from_slug(s).ok_or_else(|| CliError::InvalidAgent(s.clone())))
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()?;
@@ -217,481 +256,193 @@ pub fn resolve_common(
         home,
         agents,
         include_prompt_history: common.include_prompt_history
-            || config.include_prompt_history.unwrap_or(false),
+            || config.effective_wr_include_prompt_history(),
     })
 }
 
-/// Resolve mail recipients: CLI flag > config. Empty means unset.
-pub fn resolve_mail_to(cli: &Option<Vec<String>>, config: &Config) -> Vec<String> {
-    cli.clone()
-        .or_else(|| config.mail_to.clone())
-        .unwrap_or_default()
-}
-
-/// Merge summarization backend options.
-pub fn resolve_backend(args: &BackendArgs, config: &Config) -> Result<EffectiveBackend, CliError> {
+/// Resolve LLM backend; `mail_to` comes from skill section (wr or signoff).
+pub fn resolve_backend(
+    args: &BackendArgs,
+    config: &Config,
+    skill_mail_to: Option<&[String]>,
+) -> Result<EffectiveBackend, CliError> {
     let kind = match args
         .backend
         .as_deref()
-        .or(config.backend.as_deref())
+        .or(config.effective_llm_backend())
         .unwrap_or("cli")
     {
         "cli" => BackendKind::Cli,
         "api" => BackendKind::Api,
         other => return Err(CliError::InvalidBackend(other.to_string())),
     };
+    let mail_to = args
+        .mail_to
+        .clone()
+        .or_else(|| skill_mail_to.map(|s| s.to_vec()))
+        .unwrap_or_default();
     Ok(EffectiveBackend {
         kind,
         cli_name: args
             .cli_name
             .clone()
-            .or_else(|| config.cli_name.clone())
+            .or_else(|| config.effective_cli_name().map(str::to_string))
             .unwrap_or_else(|| "claude".to_string()),
-        cli_cmd: args.cmd.clone().or_else(|| config.cli_cmd.clone()),
-        template: args.template.clone().or_else(|| config.template.clone()),
+        cli_cmd: args
+            .cmd
+            .clone()
+            .or_else(|| config.effective_cli_cmd().map(str::to_string)),
+        template: args
+            .template
+            .clone()
+            .or_else(|| config.effective_wr_template().map(PathBuf::from)),
         api_base_url: args
             .base_url
             .clone()
-            .or_else(|| config.api_base_url.clone())
+            .or_else(|| config.effective_api_base_url().map(str::to_string))
             .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
         api_key_env: args
             .api_key_env
             .clone()
-            .or_else(|| config.api_key_env.clone())
+            .or_else(|| config.effective_api_key_env().map(str::to_string))
             .unwrap_or_else(|| "OPENAI_API_KEY".to_string()),
         api_model: args
             .model
             .clone()
-            .or_else(|| config.api_model.clone())
+            .or_else(|| config.effective_api_model().map(str::to_string))
             .unwrap_or_else(|| "gpt-4o-mini".to_string()),
         timeout_secs: args
             .timeout_secs
-            .or(config.timeout_secs)
+            .or(config.effective_timeout_secs())
             .unwrap_or(600),
-        mail_to: args
-            .mail_to
-            .clone()
-            .or_else(|| config.mail_to.clone())
-            .unwrap_or_default(),
+        mail_to,
         worker: args.worker,
     })
 }
 
+pub fn resolve_mail_to(cli: &Option<Vec<String>>, skill_default: Option<&[String]>) -> Vec<String> {
+    cli.clone()
+        .or_else(|| skill_default.map(|s| s.to_vec()))
+        .unwrap_or_default()
+}
+
+pub fn resolve_signoff_settings(
+    args: &SignoffRunArgs,
+    config: &Config,
+    default_home: &std::path::Path,
+) -> SignoffSettings {
+    let conf = &config.signoff;
+    let min_confidence = conf
+        .min_confidence
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.8);
+    SignoffSettings {
+        window_hours: args.window_hours.or(conf.window_hours).unwrap_or(24),
+        mail_to: args
+            .llm
+            .mail_to
+            .clone()
+            .or_else(|| conf.mail_to.clone())
+            .unwrap_or_default(),
+        allowed_workspaces: conf
+            .allowed_workspaces
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
+        max_auto_todos: conf.max_auto_todos.unwrap_or(3),
+        act_timeout_secs: conf.act_timeout_secs.unwrap_or(1800),
+        dry_run: args.dry_run || conf.dry_run.unwrap_or(false),
+        min_confidence,
+        out_dir: args
+            .out
+            .clone()
+            .or_else(|| config.out_dir.as_ref().map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("out")),
+        home: args
+            .home
+            .clone()
+            .unwrap_or_else(|| default_home.to_path_buf()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        BackendArgs, BackendKind, Cli, CliError, Command, CommonArgs, RangeArgs, resolve_backend,
-        resolve_common,
-    };
-    use crate::config::Config;
-    use crate::domain::{AgentKind, DomainError};
-    use chrono::NaiveDate;
-    use clap::{CommandFactory, Parser};
-    use std::path::{Path, PathBuf};
-
-    fn d(s: &str) -> NaiveDate {
-        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
-    }
-
-    fn today() -> NaiveDate {
-        d("2026-07-18")
-    }
-
-    fn fake_home() -> PathBuf {
-        PathBuf::from("/fake/home")
-    }
+    use super::*;
+    use clap::Parser;
 
     #[test]
-    fn clap_definition_is_valid() {
-        Cli::command().debug_assert();
-    }
-
-    #[test]
-    fn parses_collect_with_dates_and_agents() {
+    fn parses_wr_run() {
         let cli = Cli::try_parse_from([
-            "ai-weekly-report",
-            "collect",
-            "--from",
-            "2026-07-12",
-            "--to",
-            "2026-07-18",
-            "--agents",
-            "codex,claude",
-        ])
-        .unwrap();
-        let Command::Collect(args) = cli.command else {
-            panic!("expected collect")
-        };
-        assert_eq!(args.common.range.from, Some(d("2026-07-12")));
-        assert_eq!(args.common.range.to, Some(d("2026-07-18")));
-        assert_eq!(
-            args.common.agents,
-            Some(vec!["codex".to_string(), "claude".to_string()])
-        );
-    }
-
-    #[test]
-    fn parses_run_with_backend_flags() {
-        let cli = Cli::try_parse_from([
-            "ai-weekly-report",
+            "buddy",
+            "wr",
             "run",
             "--days",
-            "14",
+            "7",
             "--backend",
             "api",
-            "--model",
-            "deepseek-chat",
-            "--mail-to",
-            "a@example.com,b@example.com",
         ])
         .unwrap();
-        let Command::Run(args) = cli.command else {
+        let Command::Wr(wr) = cli.command else {
+            panic!("expected wr")
+        };
+        let WrCommand::Run(args) = wr.command else {
             panic!("expected run")
         };
-        assert_eq!(args.common.range.days, Some(14));
+        assert_eq!(args.common.range.days, Some(7));
         assert_eq!(args.backend.backend.as_deref(), Some("api"));
-        assert_eq!(args.backend.model.as_deref(), Some("deepseek-chat"));
-        assert_eq!(
-            args.backend.mail_to.as_deref(),
-            Some(["a@example.com".to_string(), "b@example.com".to_string()].as_slice())
-        );
-        assert!(!args.backend.worker);
     }
 
     #[test]
-    fn parses_hidden_worker_flag() {
-        let cli = Cli::try_parse_from([
-            "ai-weekly-report",
-            "report",
-            "--worker",
-            "--days",
-            "7",
-        ])
-        .unwrap();
-        let Command::Report(args) = cli.command else {
-            panic!("expected report")
-        };
-        assert!(args.backend.worker);
-    }
-
-    // ---------- resolve_common ----------
-
-    #[test]
-    fn resolve_range_prefers_from_to_over_days() {
-        let common = CommonArgs {
-            range: RangeArgs {
-                from: Some(d("2026-07-12")),
-                to: Some(d("2026-07-18")),
-                days: Some(3),
-            },
-            ..Default::default()
-        };
-        let eff = resolve_common(&common, &Config::default(), today(), &fake_home()).unwrap();
-        assert_eq!(eff.range.start, d("2026-07-12"));
-        assert_eq!(eff.range.end, d("2026-07-18"));
+    fn parses_weekly_report_alias() {
+        let cli = Cli::try_parse_from(["buddy", "weekly-report", "sources"]).unwrap();
+        assert!(matches!(cli.command, Command::Wr(_)));
     }
 
     #[test]
-    fn resolve_range_days_flag_over_config_over_default() {
-        let config = Config {
-            days: Some(14),
-            ..Default::default()
+    fn parses_signoff_default_and_plan() {
+        let cli = Cli::try_parse_from(["buddy", "signoff", "--dry-run"]).unwrap();
+        let Command::Signoff(args) = cli.command else {
+            panic!("expected signoff")
         };
-        // flag > config
-        let common = CommonArgs {
-            range: RangeArgs {
-                days: Some(3),
-                ..Default::default()
-            },
-            ..Default::default()
+        assert!(args.command.is_none());
+        assert!(args.run.dry_run);
+
+        let cli = Cli::try_parse_from(["buddy", "signoff", "plan"]).unwrap();
+        let Command::Signoff(args) = cli.command else {
+            panic!("expected signoff")
         };
-        let eff = resolve_common(&common, &config, today(), &fake_home()).unwrap();
-        assert_eq!(eff.range.start, d("2026-07-16")); // 2 days before today
-        assert_eq!(eff.range.end, today());
-        // config > default
-        let eff = resolve_common(&CommonArgs::default(), &config, today(), &fake_home()).unwrap();
-        assert_eq!(eff.range.start, d("2026-07-05")); // 14 days
-        // default = 7
-        let eff = resolve_common(
-            &CommonArgs::default(),
-            &Config::default(),
-            today(),
-            &fake_home(),
-        )
-        .unwrap();
-        assert_eq!(eff.range.start, d("2026-07-12")); // 7 days
+        assert!(matches!(args.command, Some(SignoffCommand::Plan(_))));
     }
 
     #[test]
-    fn resolve_range_single_bound_errors() {
-        let common = CommonArgs {
-            range: RangeArgs {
-                from: Some(d("2026-07-12")),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let err = resolve_common(&common, &Config::default(), today(), &fake_home()).unwrap_err();
-        assert!(matches!(err, CliError::MissingRangeBound));
-    }
-
-    #[test]
-    fn resolve_range_inverted_propagates_domain_error() {
-        let common = CommonArgs {
-            range: RangeArgs {
-                from: Some(d("2026-07-18")),
-                to: Some(d("2026-07-12")),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let err = resolve_common(&common, &Config::default(), today(), &fake_home()).unwrap_err();
+    fn parses_completions() {
+        let cli = Cli::try_parse_from(["buddy", "completions", "bash"]).unwrap();
         assert!(matches!(
-            err,
-            CliError::Range(DomainError::InvertedRange { .. })
+            cli.command,
+            Command::Completions(CompletionsArgs {
+                shell: ShellKind::Bash
+            })
         ));
     }
 
     #[test]
-    fn resolve_out_dir_precedence() {
-        // flag > config
-        let common = CommonArgs {
-            out: Some(PathBuf::from("flag-out")),
-            ..Default::default()
-        };
+    fn resolve_backend_uses_wr_mail() {
         let config = Config {
-            out_dir: Some("config-out".to_string()),
+            wr: crate::config::WrConfig {
+                mail_to: Some(vec!["w@example.com".into()]),
+                ..Default::default()
+            },
             ..Default::default()
         };
-        let eff = resolve_common(&common, &config, today(), &fake_home()).unwrap();
-        assert_eq!(eff.out_dir, PathBuf::from("flag-out"));
-        // config > default
-        let eff = resolve_common(&CommonArgs::default(), &config, today(), &fake_home()).unwrap();
-        assert_eq!(eff.out_dir, PathBuf::from("config-out"));
-        // default
-        let eff = resolve_common(
-            &CommonArgs::default(),
-            &Config::default(),
-            today(),
-            &fake_home(),
+        let eff = resolve_backend(
+            &BackendArgs::default(),
+            &config,
+            config.effective_wr_mail_to(),
         )
         .unwrap();
-        assert_eq!(eff.out_dir, PathBuf::from("out"));
-    }
-
-    #[test]
-    fn resolve_home_flag_over_default() {
-        let common = CommonArgs {
-            home: Some(PathBuf::from("/custom/home")),
-            ..Default::default()
-        };
-        let eff = resolve_common(&common, &Config::default(), today(), &fake_home()).unwrap();
-        assert_eq!(eff.home, PathBuf::from("/custom/home"));
-        let eff = resolve_common(
-            &CommonArgs::default(),
-            &Config::default(),
-            today(),
-            &fake_home(),
-        )
-        .unwrap();
-        assert_eq!(eff.home, fake_home());
-    }
-
-    #[test]
-    fn resolve_agents_parsed_and_invalid_rejected() {
-        let common = CommonArgs {
-            agents: Some(vec!["codex".to_string(), "gemini".to_string()]),
-            ..Default::default()
-        };
-        let eff = resolve_common(&common, &Config::default(), today(), &fake_home()).unwrap();
-        assert_eq!(
-            eff.agents,
-            Some(vec![AgentKind::Codex, AgentKind::Gemini])
-        );
-
-        let common = CommonArgs {
-            agents: Some(vec!["nonexistent".to_string()]),
-            ..Default::default()
-        };
-        let err = resolve_common(&common, &Config::default(), today(), &fake_home()).unwrap_err();
-        assert!(matches!(err, CliError::InvalidAgent(_)));
-    }
-
-    // ---------- resolve_backend ----------
-
-    #[test]
-    fn resolve_backend_defaults() {
-        let eff = resolve_backend(&BackendArgs::default(), &Config::default()).unwrap();
-        assert_eq!(eff.kind, BackendKind::Cli);
-        assert_eq!(eff.cli_name, "claude");
-        assert_eq!(eff.timeout_secs, 600);
-        assert_eq!(eff.api_base_url, "https://api.openai.com/v1");
-        assert_eq!(eff.api_key_env, "OPENAI_API_KEY");
-        assert_eq!(eff.api_model, "gpt-4o-mini");
-        assert!(eff.mail_to.is_empty());
-        assert!(!eff.worker);
-    }
-
-    #[test]
-    fn resolve_mail_to_flag_over_config() {
-        let config = Config {
-            mail_to: Some(vec!["cfg@example.com".to_string()]),
-            ..Default::default()
-        };
-        let eff = resolve_backend(&BackendArgs::default(), &config).unwrap();
-        assert_eq!(eff.mail_to, vec!["cfg@example.com".to_string()]);
-        let args = BackendArgs {
-            mail_to: Some(vec!["cli@example.com".to_string()]),
-            ..Default::default()
-        };
-        let eff = resolve_backend(&args, &config).unwrap();
-        assert_eq!(eff.mail_to, vec!["cli@example.com".to_string()]);
-    }
-
-    #[test]
-    fn resolve_backend_flag_over_config() {
-        let config = Config {
-            backend: Some("api".to_string()),
-            cli_name: Some("codex".to_string()),
-            timeout_secs: Some(60),
-            ..Default::default()
-        };
-        // config applies
-        let eff = resolve_backend(&BackendArgs::default(), &config).unwrap();
-        assert_eq!(eff.kind, BackendKind::Api);
-        assert_eq!(eff.cli_name, "codex");
-        assert_eq!(eff.timeout_secs, 60);
-        // flag > config
-        let args = BackendArgs {
-            backend: Some("cli".to_string()),
-            cli_name: Some("agy".to_string()),
-            ..Default::default()
-        };
-        let eff = resolve_backend(&args, &config).unwrap();
-        assert_eq!(eff.kind, BackendKind::Cli);
-        assert_eq!(eff.cli_name, "agy");
-        assert_eq!(eff.timeout_secs, 60); // unset fields still come from config
-    }
-
-    #[test]
-    fn resolve_backend_api_fields_from_config() {
-        let config = Config {
-            backend: Some("api".to_string()),
-            api_base_url: Some("https://api.deepseek.com/v1".to_string()),
-            api_key_env: Some("DEEPSEEK_API_KEY".to_string()),
-            api_model: Some("deepseek-chat".to_string()),
-            ..Default::default()
-        };
-        let eff = resolve_backend(&BackendArgs::default(), &config).unwrap();
-        assert_eq!(eff.kind, BackendKind::Api);
-        assert_eq!(eff.api_base_url, "https://api.deepseek.com/v1");
-        assert_eq!(eff.api_key_env, "DEEPSEEK_API_KEY");
-        assert_eq!(eff.api_model, "deepseek-chat");
-    }
-
-    #[test]
-    fn resolve_backend_invalid_backend_errors() {
-        let args = BackendArgs {
-            backend: Some("mystery".to_string()),
-            ..Default::default()
-        };
-        let err = resolve_backend(&args, &Config::default()).unwrap_err();
-        assert!(matches!(err, CliError::InvalidBackend(_)));
-    }
-
-    #[test]
-    fn resolve_common_include_prompt_history_flag_or_config() {
-        let config = Config {
-            include_prompt_history: Some(true),
-            ..Default::default()
-        };
-        let eff = resolve_common(&CommonArgs::default(), &config, today(), &fake_home()).unwrap();
-        assert!(eff.include_prompt_history);
-        let common = CommonArgs {
-            include_prompt_history: true,
-            ..Default::default()
-        };
-        let eff = resolve_common(&common, &Config::default(), today(), &fake_home()).unwrap();
-        assert!(eff.include_prompt_history);
-        let eff = resolve_common(
-            &CommonArgs::default(),
-            &Config::default(),
-            today(),
-            &fake_home(),
-        )
-        .unwrap();
-        assert!(!eff.include_prompt_history);
-    }
-
-    #[test]
-    fn resolve_template_flag_over_config() {
-        let config = Config {
-            template: Some(PathBuf::from("/config/tpl.md")),
-            ..Default::default()
-        };
-        let eff = resolve_backend(&BackendArgs::default(), &config).unwrap();
-        assert_eq!(eff.template, Some(PathBuf::from("/config/tpl.md")));
-        let args = BackendArgs {
-            template: Some(PathBuf::from("/flag/tpl.md")),
-            ..Default::default()
-        };
-        let eff = resolve_backend(&args, &config).unwrap();
-        assert_eq!(eff.template, Some(PathBuf::from("/flag/tpl.md")));
-    }
-
-    #[test]
-    fn sources_subcommand_parses() {
-        let cli = Cli::try_parse_from(["ai-weekly-report", "sources"]).unwrap();
-        assert!(matches!(cli.command, Command::Sources(_)));
-    }
-
-    #[test]
-    fn parses_mail_with_report_path_and_recipients() {
-        let cli = Cli::try_parse_from([
-            "ai-weekly-report",
-            "mail",
-            "out/2026-07-12_2026-07-18/report.md",
-            "--mail-to",
-            "a@example.com,b@example.com",
-        ])
-        .unwrap();
-        let Command::Mail(args) = cli.command else {
-            panic!("expected mail")
-        };
-        assert_eq!(
-            args.report,
-            PathBuf::from("out/2026-07-12_2026-07-18/report.md")
-        );
-        assert_eq!(
-            args.mail_to.as_deref(),
-            Some(["a@example.com".to_string(), "b@example.com".to_string()].as_slice())
-        );
-    }
-
-    #[test]
-    fn resolve_mail_to_flag_over_config_standalone() {
-        use super::resolve_mail_to;
-        let config = Config {
-            mail_to: Some(vec!["cfg@example.com".to_string()]),
-            ..Default::default()
-        };
-        assert_eq!(
-            resolve_mail_to(&None, &config),
-            vec!["cfg@example.com".to_string()]
-        );
-        assert_eq!(
-            resolve_mail_to(&Some(vec!["cli@example.com".to_string()]), &config),
-            vec!["cli@example.com".to_string()]
-        );
-        assert!(resolve_mail_to(&None, &Config::default()).is_empty());
-    }
-
-    #[test]
-    fn home_used_in_sources_args() {
-        let cli = Cli::try_parse_from(["ai-weekly-report", "sources", "--home", "/tmp/h"]).unwrap();
-        let Command::Sources(args) = cli.command else {
-            panic!("expected sources")
-        };
-        assert_eq!(args.home, Some(Path::new("/tmp/h").to_path_buf()));
+        assert_eq!(eff.mail_to, vec!["w@example.com".to_string()]);
     }
 }

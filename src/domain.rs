@@ -156,6 +156,51 @@ impl DateRange {
     }
 }
 
+/// Rolling wall-clock window (e.g. last 24 hours) for signoff ingest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeWindow {
+    pub start: DateTime<Local>,
+    pub end: DateTime<Local>,
+}
+
+impl TimeWindow {
+    pub fn last_hours(hours: u64, end: DateTime<Local>) -> Self {
+        let hours = hours.max(1) as i64;
+        Self {
+            start: end - Duration::hours(hours),
+            end,
+        }
+    }
+
+    pub fn contains_ts(&self, ts: &DateTime<Local>) -> bool {
+        *ts >= self.start && *ts <= self.end
+    }
+
+    /// Covering calendar range for source scanners that still key off days.
+    pub fn covering_date_range(&self) -> DateRange {
+        DateRange {
+            start: self.start.date_naive(),
+            end: self.end.date_naive(),
+        }
+    }
+}
+
+/// Keep only messages inside `window`; drop sessions that become empty.
+pub fn filter_sessions_to_window(sessions: Vec<Session>, window: &TimeWindow) -> Vec<Session> {
+    sessions
+        .into_iter()
+        .filter_map(|mut s| {
+            s.messages.retain(|m| window.contains_ts(&m.timestamp));
+            if s.messages.is_empty() {
+                None
+            } else {
+                s.started_at = s.messages[0].timestamp;
+                Some(s)
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DomainError {
     #[error("invalid date range: start {start} is after end {end}")]
@@ -234,6 +279,21 @@ mod tests {
         let outside = local_dt(d("2026-07-19").and_hms_opt(0, 0, 0).unwrap());
         assert!(range.contains_ts(&inside));
         assert!(!range.contains_ts(&outside));
+    }
+
+    #[test]
+    fn time_window_filters_across_midnight() {
+        let end = local_dt(d("2026-07-18").and_hms_opt(9, 0, 0).unwrap());
+        let window = TimeWindow::last_hours(24, end);
+        assert!(window.contains_ts(&local_dt(
+            d("2026-07-17").and_hms_opt(10, 0, 0).unwrap()
+        )));
+        assert!(!window.contains_ts(&local_dt(
+            d("2026-07-17").and_hms_opt(8, 0, 0).unwrap()
+        )));
+        let cover = window.covering_date_range();
+        assert_eq!(cover.start, d("2026-07-17"));
+        assert_eq!(cover.end, d("2026-07-18"));
     }
 
     #[test]

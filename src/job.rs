@@ -1,4 +1,4 @@
-//! Detached background worker for async report generation.
+//! Detached background workers for wr report and signoff.
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
@@ -8,6 +8,7 @@ use chrono::NaiveDate;
 
 use crate::cli::{BackendKind, EffectiveBackend, EffectiveCommon};
 use crate::domain::DateRange;
+use crate::signoff::SignoffSettings;
 
 #[derive(Debug)]
 pub struct SpawnedJob {
@@ -17,10 +18,47 @@ pub struct SpawnedJob {
     pub pid_path: PathBuf,
 }
 
-/// Spawn a detached copy of this binary to run `report --worker ...`.
-///
-/// Stdout/stderr of the worker go to `range_dir/report.log`. PID is written to
-/// `range_dir/report.pid`.
+fn detach(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+}
+
+fn append_backend_args(cmd: &mut Command, backend: &EffectiveBackend) {
+    cmd.arg("--backend")
+        .arg(match backend.kind {
+            BackendKind::Cli => "cli",
+            BackendKind::Api => "api",
+        })
+        .arg("--cli-name")
+        .arg(&backend.cli_name)
+        .arg("--base-url")
+        .arg(&backend.api_base_url)
+        .arg("--api-key-env")
+        .arg(&backend.api_key_env)
+        .arg("--model")
+        .arg(&backend.api_model)
+        .arg("--timeout-secs")
+        .arg(backend.timeout_secs.to_string());
+    if let Some(c) = &backend.cli_cmd {
+        cmd.arg("--cmd").arg(c);
+    }
+    if let Some(t) = &backend.template {
+        cmd.arg("--template").arg(t);
+    }
+    if !backend.mail_to.is_empty() {
+        cmd.arg("--mail-to").arg(backend.mail_to.join(","));
+    }
+}
+
+/// Spawn `buddy wr report --worker ...`.
 pub fn spawn_report_worker(
     range_dir: &Path,
     common: &EffectiveCommon,
@@ -39,7 +77,8 @@ pub fn spawn_report_worker(
 
     let exe = std::env::current_exe()?;
     let mut cmd = Command::new(exe);
-    cmd.arg("report")
+    cmd.arg("wr")
+        .arg("report")
         .arg("--worker")
         .arg("--from")
         .arg(common.range.start.to_string())
@@ -48,35 +87,8 @@ pub fn spawn_report_worker(
         .arg("--out")
         .arg(&common.out_dir)
         .arg("--home")
-        .arg(&common.home)
-        .arg("--backend")
-        .arg(match backend.kind {
-            BackendKind::Cli => "cli",
-            BackendKind::Api => "api",
-        })
-        .arg("--cli-name")
-        .arg(&backend.cli_name)
-        .arg("--base-url")
-        .arg(&backend.api_base_url)
-        .arg("--api-key-env")
-        .arg(&backend.api_key_env)
-        .arg("--model")
-        .arg(&backend.api_model)
-        .arg("--timeout-secs")
-        .arg(backend.timeout_secs.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_err));
-
-    if let Some(cmd_template) = &backend.cli_cmd {
-        cmd.arg("--cmd").arg(cmd_template);
-    }
-    if let Some(template) = &backend.template {
-        cmd.arg("--template").arg(template);
-    }
-    if !backend.mail_to.is_empty() {
-        cmd.arg("--mail-to").arg(backend.mail_to.join(","));
-    }
+        .arg(&common.home);
+    append_backend_args(&mut cmd, backend);
     if let Some(agents) = &common.agents {
         let list = agents
             .iter()
@@ -88,24 +100,14 @@ pub fn spawn_report_worker(
     if common.include_prompt_history {
         cmd.arg("--include-prompt-history");
     }
-
-    // Detach from the controlling terminal so the worker survives shell exit.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                // setsid() fails only if already a leader; ignore that case.
-                libc::setsid();
-                Ok(())
-            });
-        }
-    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_err));
+    detach(&mut cmd);
 
     let child = cmd.spawn()?;
     let pid = child.id();
     let _ = std::fs::write(&pid_path, format!("{pid}\n"));
-
     Ok(SpawnedJob {
         pid,
         report_path,
@@ -114,12 +116,58 @@ pub fn spawn_report_worker(
     })
 }
 
-/// Build the email subject line for a date range.
+/// Spawn `buddy signoff run --worker ...`.
+pub fn spawn_signoff_worker(
+    work_dir: &Path,
+    settings: &SignoffSettings,
+    backend: &EffectiveBackend,
+) -> std::io::Result<SpawnedJob> {
+    std::fs::create_dir_all(work_dir)?;
+    let log_path = work_dir.join("signoff.log");
+    let pid_path = work_dir.join("signoff.pid");
+    let report_path = work_dir.join("signoff.md");
+
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let log_err = log_file.try_clone()?;
+
+    let exe = std::env::current_exe()?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("signoff")
+        .arg("run")
+        .arg("--worker")
+        .arg("--out")
+        .arg(&settings.out_dir)
+        .arg("--home")
+        .arg(&settings.home)
+        .arg("--window-hours")
+        .arg(settings.window_hours.to_string());
+    if settings.dry_run {
+        cmd.arg("--dry-run");
+    }
+    append_backend_args(&mut cmd, backend);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_err));
+    detach(&mut cmd);
+
+    let child = cmd.spawn()?;
+    let pid = child.id();
+    let _ = std::fs::write(&pid_path, format!("{pid}\n"));
+    Ok(SpawnedJob {
+        pid,
+        report_path,
+        log_path,
+        pid_path,
+    })
+}
+
 pub fn mail_subject(range: &DateRange) -> String {
     format!("AI weekly report {} ~ {}", range.start, range.end)
 }
 
-/// Subject for an existing report file: parse parent dir `YYYY-MM-DD_YYYY-MM-DD` when present.
 pub fn mail_subject_for_report_path(report_path: &Path) -> String {
     let parent_name = report_path
         .parent()
@@ -132,7 +180,12 @@ pub fn mail_subject_for_report_path(report_path: &Path) -> String {
     {
         return format!("AI weekly report {start} ~ {end}");
     }
-    "AI weekly report".to_string()
+    if parent_name.chars().filter(|c| *c == '-').count() == 2
+        && NaiveDate::parse_from_str(parent_name, "%Y-%m-%d").is_ok()
+    {
+        return format!("buddy signoff {parent_name}");
+    }
+    "buddy mail".to_string()
 }
 
 #[cfg(test)]
@@ -141,7 +194,7 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn subject_from_range_parent_dir() {
+    fn subject_from_wr_range_dir() {
         assert_eq!(
             mail_subject_for_report_path(Path::new("out/2026-07-12_2026-07-18/report.md")),
             "AI weekly report 2026-07-12 ~ 2026-07-18"
@@ -149,10 +202,10 @@ mod tests {
     }
 
     #[test]
-    fn subject_fallback_when_parent_not_a_range() {
+    fn subject_from_signoff_day_dir() {
         assert_eq!(
-            mail_subject_for_report_path(Path::new("/tmp/report.md")),
-            "AI weekly report"
+            mail_subject_for_report_path(Path::new("out/signoff/2026-08-04/signoff.md")),
+            "buddy signoff 2026-08-04"
         );
     }
 }

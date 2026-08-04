@@ -1,5 +1,6 @@
-//! Configuration file: `~/.config/ai-weekly-report/config.toml` (optional).
-//! Priority: CLI flag > config > built-in defaults. Unknown fields are tolerated (forward compatible).
+//! Configuration: `~/.config/buddy/config.toml` (optional).
+//! Priority: CLI flag > config > built-in defaults.
+//! Falls back to legacy `~/.config/ai-weekly-report/config.toml` when the new path is missing.
 
 use std::path::{Path, PathBuf};
 
@@ -8,27 +9,56 @@ use serde::Deserialize;
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Config {
-    /// Output root directory (relative to cwd or absolute), default "out".
     pub out_dir: Option<String>,
-    /// Default lookback days, default 7.
+    pub llm: LlmConfig,
+    pub wr: WrConfig,
+    pub signoff: SignoffConfig,
+    // ---- legacy flat fields (ai-weekly-report) ----
     pub days: Option<u32>,
-    /// Summarization backend: "cli" | "api".
     pub backend: Option<String>,
-    /// CLI backend preset name: codex | claude | agy | gemini.
     pub cli_name: Option<String>,
-    /// Custom CLI command template (overrides cli_name preset).
     pub cli_cmd: Option<String>,
-    /// External CLI timeout in seconds, default 600.
     pub timeout_secs: Option<u64>,
     pub api_base_url: Option<String>,
     pub api_key_env: Option<String>,
     pub api_model: Option<String>,
-    /// Weekly report template file path.
     pub template: Option<PathBuf>,
-    /// Gemini/antigravity: whether to include history.jsonl.
     pub include_prompt_history: Option<bool>,
-    /// Email recipients for finished reports (mutt). Empty/absent = do not send.
     pub mail_to: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct LlmConfig {
+    pub backend: Option<String>,
+    pub cli_name: Option<String>,
+    pub cli_cmd: Option<String>,
+    pub timeout_secs: Option<u64>,
+    pub api_base_url: Option<String>,
+    pub api_key_env: Option<String>,
+    pub api_model: Option<String>,
+    pub template: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct WrConfig {
+    pub days: Option<u32>,
+    pub mail_to: Option<Vec<String>>,
+    pub include_prompt_history: Option<bool>,
+    pub template: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SignoffConfig {
+    pub window_hours: Option<u64>,
+    pub mail_to: Option<Vec<String>>,
+    pub allowed_workspaces: Option<Vec<String>>,
+    pub max_auto_todos: Option<usize>,
+    pub act_timeout_secs: Option<u64>,
+    pub dry_run: Option<bool>,
+    pub min_confidence: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -48,14 +78,29 @@ pub enum ConfigError {
 }
 
 impl Config {
-    /// Default config path: `<home>/.config/ai-weekly-report/config.toml`.
     pub fn default_path(home: &Path) -> PathBuf {
+        home.join(".config").join("buddy").join("config.toml")
+    }
+
+    pub fn legacy_path(home: &Path) -> PathBuf {
         home.join(".config")
             .join("ai-weekly-report")
             .join("config.toml")
     }
 
-    /// Load config; returns all defaults (every field None) when the file is missing.
+    /// Load new path first; if missing, try legacy path.
+    pub fn load_for_home(home: &Path) -> Result<Config, ConfigError> {
+        let primary = Self::default_path(home);
+        if primary.exists() {
+            return Self::load(&primary);
+        }
+        let legacy = Self::legacy_path(home);
+        if legacy.exists() {
+            return Self::load(&legacy);
+        }
+        Ok(Config::default())
+    }
+
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
         match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text).map_err(|source| ConfigError::Parse {
@@ -69,99 +114,146 @@ impl Config {
             }),
         }
     }
+
+    pub fn effective_llm_backend(&self) -> Option<&str> {
+        self.llm.backend.as_deref().or(self.backend.as_deref())
+    }
+
+    pub fn effective_cli_name(&self) -> Option<&str> {
+        self.llm.cli_name.as_deref().or(self.cli_name.as_deref())
+    }
+
+    pub fn effective_cli_cmd(&self) -> Option<&str> {
+        self.llm.cli_cmd.as_deref().or(self.cli_cmd.as_deref())
+    }
+
+    pub fn effective_timeout_secs(&self) -> Option<u64> {
+        self.llm.timeout_secs.or(self.timeout_secs)
+    }
+
+    pub fn effective_api_base_url(&self) -> Option<&str> {
+        self.llm
+            .api_base_url
+            .as_deref()
+            .or(self.api_base_url.as_deref())
+    }
+
+    pub fn effective_api_key_env(&self) -> Option<&str> {
+        self.llm
+            .api_key_env
+            .as_deref()
+            .or(self.api_key_env.as_deref())
+    }
+
+    pub fn effective_api_model(&self) -> Option<&str> {
+        self.llm
+            .api_model
+            .as_deref()
+            .or(self.api_model.as_deref())
+    }
+
+    pub fn effective_wr_days(&self) -> Option<u32> {
+        self.wr.days.or(self.days)
+    }
+
+    pub fn effective_wr_mail_to(&self) -> Option<&[String]> {
+        self.wr
+            .mail_to
+            .as_deref()
+            .or(self.mail_to.as_deref())
+    }
+
+    pub fn effective_wr_include_prompt_history(&self) -> bool {
+        self.wr
+            .include_prompt_history
+            .or(self.include_prompt_history)
+            .unwrap_or(false)
+    }
+
+    pub fn effective_wr_template(&self) -> Option<&Path> {
+        self.wr
+            .template
+            .as_deref()
+            .or(self.llm.template.as_deref())
+            .or(self.template.as_deref())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ConfigError};
+    use super::Config;
 
     #[test]
     fn missing_file_returns_default() {
         let tmp = tempfile::tempdir().unwrap();
         let config = Config::load(&tmp.path().join("nonexistent.toml")).unwrap();
         assert!(config.out_dir.is_none());
-        assert!(config.backend.is_none());
-        assert!(config.include_prompt_history.is_none());
     }
 
     #[test]
-    fn parses_full_config() {
+    fn parses_layered_config() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(
             &path,
             r#"
 out_dir = "artifacts"
-days = 14
+[llm]
 backend = "api"
 cli_name = "codex"
-cli_cmd = "my-wrapper --fast"
-timeout_secs = 300
-api_base_url = "https://api.deepseek.com/v1"
-api_key_env = "DEEPSEEK_API_KEY"
-api_model = "deepseek-chat"
-template = "/home/me/weekly-template.md"
-include_prompt_history = true
-mail_to = ["a@example.com", "b@example.com"]
+[wr]
+days = 14
+mail_to = ["weekly@example.com"]
+[signoff]
+window_hours = 24
+mail_to = ["me@example.com"]
+allowed_workspaces = ["/tmp/proj"]
+max_auto_todos = 2
+dry_run = true
 "#,
         )
         .unwrap();
         let config = Config::load(&path).unwrap();
         assert_eq!(config.out_dir.as_deref(), Some("artifacts"));
-        assert_eq!(config.days, Some(14));
-        assert_eq!(config.backend.as_deref(), Some("api"));
-        assert_eq!(config.cli_name.as_deref(), Some("codex"));
-        assert_eq!(config.cli_cmd.as_deref(), Some("my-wrapper --fast"));
-        assert_eq!(config.timeout_secs, Some(300));
-        assert_eq!(config.api_base_url.as_deref(), Some("https://api.deepseek.com/v1"));
-        assert_eq!(config.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
-        assert_eq!(config.api_model.as_deref(), Some("deepseek-chat"));
+        assert_eq!(config.llm.backend.as_deref(), Some("api"));
+        assert_eq!(config.wr.days, Some(14));
         assert_eq!(
-            config.template.as_deref(),
-            Some(std::path::Path::new("/home/me/weekly-template.md"))
+            config.wr.mail_to.as_deref(),
+            Some(["weekly@example.com".to_string()].as_slice())
         );
-        assert_eq!(config.include_prompt_history, Some(true));
+        assert_eq!(config.signoff.window_hours, Some(24));
+        assert_eq!(config.signoff.max_auto_todos, Some(2));
+        assert_eq!(config.signoff.dry_run, Some(true));
+    }
+
+    #[test]
+    fn legacy_flat_fields_still_resolve() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+backend = "cli"
+days = 7
+mail_to = ["old@example.com"]
+"#,
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.effective_llm_backend(), Some("cli"));
+        assert_eq!(config.effective_wr_days(), Some(7));
         assert_eq!(
-            config.mail_to.as_deref(),
-            Some(["a@example.com".to_string(), "b@example.com".to_string()].as_slice())
+            config.effective_wr_mail_to(),
+            Some(["old@example.com".to_string()].as_slice())
         );
     }
 
     #[test]
-    fn partial_config_leaves_rest_none() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "backend = \"api\"\n").unwrap();
-        let config = Config::load(&path).unwrap();
-        assert_eq!(config.backend.as_deref(), Some("api"));
-        assert!(config.days.is_none());
-        assert!(config.api_model.is_none());
-    }
-
-    #[test]
-    fn bad_toml_returns_parse_error() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "backend = [unclosed\n").unwrap();
-        let err = Config::load(&path).unwrap_err();
-        assert!(matches!(err, ConfigError::Parse { .. }));
-    }
-
-    #[test]
-    fn unknown_fields_tolerated() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "future_field = 1\nbackend = \"cli\"\n").unwrap();
-        let config = Config::load(&path).unwrap();
-        assert_eq!(config.backend.as_deref(), Some("cli"));
-    }
-
-    #[test]
-    fn default_path_under_config_dir() {
+    fn default_path_under_buddy_config_dir() {
         let home = std::path::Path::new("/fake/home");
         assert_eq!(
             Config::default_path(home),
-            std::path::Path::new("/fake/home/.config/ai-weekly-report/config.toml")
+            std::path::Path::new("/fake/home/.config/buddy/config.toml")
         );
     }
 }

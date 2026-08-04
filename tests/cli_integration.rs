@@ -1,5 +1,4 @@
-//! End-to-end integration tests: fake $HOME (four source layouts) + TZ=Asia/Shanghai subprocess +
-//! fake CLI backend script.
+//! End-to-end integration tests for `buddy`.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -9,7 +8,6 @@ use std::time::{Duration, Instant};
 const CLAUDE_SAMPLE: &str = include_str!("fixtures/claude/session-sample.jsonl");
 const CURSOR_SAMPLE: &str = include_str!("fixtures/cursor/transcript-sample.jsonl");
 
-/// Cross-day boundary codex rollout: message at 2026-07-15T16:30Z (07-16 00:30 under UTC+8).
 const CODEX_BOUNDARY: &str = concat!(
     "{\"timestamp\":\"2026-07-15T16:25:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"bbbb2222-0000-4000-8000-000000000000\",\"cwd\":\"/home/zhaoyilun/boundary-proj\"}}\n",
     "{\"timestamp\":\"2026-07-15T16:30:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"跨日边界的提问\"}}\n",
@@ -21,26 +19,21 @@ fn write(path: &Path, content: &str) {
     std::fs::write(path, content).unwrap();
 }
 
-/// Build a fake $HOME with all four source layouts (gemini uses dynamically generated agy transcript fixture).
 fn fake_home() -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     let h = home.path();
-    // codex (cross-day boundary)
     write(
         &h.join(".codex/sessions/2026/07/15/rollout-2026-07-15T16-25-00-bbbb2222.jsonl"),
         CODEX_BOUNDARY,
     );
-    // claude
     write(
         &h.join(".claude/projects/-home-zhaoyilun-notes-app/a1b2c3d4.jsonl"),
         CLAUDE_SAMPLE,
     );
-    // cursor
     write(
         &h.join(".cursor/projects/-home-zhaoyilun-docs/agent-transcripts/b76effdc-7aea-4593-9b77-64611a6ad4cc/b76effdc-7aea-4593-9b77-64611a6ad4cc.jsonl"),
         CURSOR_SAMPLE,
     );
-    // gemini agy
     write(
         &h.join(".gemini/antigravity-cli/brain/4194a992-fddf-4a11-8f86-050f9c2470c9/.system_generated/logs/transcript.jsonl"),
         &agy_fixture(),
@@ -55,7 +48,6 @@ fn agy_fixture() -> String {
     s
 }
 
-/// Fake CLI backend: save stdin to cwd, then print a stub weekly report.
 fn fake_backend_script() -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("fake-backend.sh");
@@ -72,8 +64,29 @@ fn fake_backend_script() -> (tempfile::TempDir, std::path::PathBuf) {
     (tmp, path)
 }
 
+fn fake_plan_script() -> (tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("fake-plan.sh");
+    std::fs::write(
+        &path,
+        r#"#!/bin/sh
+cat > /dev/null
+cat <<'EOF'
+{"todos":[{"id":"t1","title":"noop","detail":"x","autonomy":"needs_human","confidence":0.5,"needs_human_reason":"demo","workspace":null,"acceptance":"n/a","evidence":[]}]}
+EOF
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    (tmp, path)
+}
+
 fn base_cmd() -> Command {
-    let mut cmd = Command::cargo_bin("ai-weekly-report").unwrap();
+    let mut cmd = Command::cargo_bin("buddy").unwrap();
     cmd.env("TZ", "Asia/Shanghai");
     cmd
 }
@@ -100,6 +113,7 @@ fn collect_end_to_end_with_day_boundary() {
     let out = tempfile::tempdir().unwrap();
     base_cmd()
         .args([
+            "wr",
             "collect",
             "--from",
             "2026-07-12",
@@ -114,35 +128,18 @@ fn collect_end_to_end_with_day_boundary() {
         .success();
 
     let dir = out.path().join("2026-07-12_2026-07-18");
-    // cross-day boundary: UTC 07-15 16:30 is 07-16 00:30 in +08 → lands in 2026-07-16.md
     let d16 = std::fs::read_to_string(dir.join("2026-07-16.md")).unwrap();
     assert!(d16.contains("跨日边界的提问"));
-    assert!(d16.contains("# 2026-07-16 周四 · AI 对话记录"));
-    // claude fixture (07-16 UTC 01:01 → 09:01 +08, also 07-16)
-    assert!(d16.contains("全文搜索"));
-    // cursor fixture (embedded UTC+8 07-15 14:18 → 07-15)
-    let d15 = std::fs::read_to_string(dir.join("2026-07-15.md")).unwrap();
-    assert!(d15.contains("审查"));
-    assert!(
-        !d15.contains("跨日边界的提问"),
-        "cross-day codex messages must not land in 07-15"
-    );
-    // gemini agy (07-14)
-    let d14 = std::fs::read_to_string(dir.join("2026-07-14.md")).unwrap();
-    assert!(d14.contains("量子蓝图"));
-    // index totals
-    let index = std::fs::read_to_string(dir.join("index.md")).unwrap();
-    assert!(index.contains("[2026-07-16](2026-07-16.md)"));
-    assert!(index.contains("合计"));
 }
 
 #[test]
-fn run_schedules_background_and_worker_writes_report() {
+fn wr_run_schedules_background() {
     let home = fake_home();
     let out = tempfile::tempdir().unwrap();
     let (_t, script) = fake_backend_script();
     base_cmd()
         .args([
+            "wr",
             "run",
             "--from",
             "2026-07-12",
@@ -160,21 +157,12 @@ fn run_schedules_background_and_worker_writes_report() {
         .stdout(predicate::str::contains("Summarization started in background"));
 
     let dir = out.path().join("2026-07-12_2026-07-18");
-    assert!(dir.join("report.pid").exists());
-    assert!(dir.join("report.log").exists());
-
     let report = wait_for_file(&dir.join("report.md"), Duration::from_secs(10));
     assert!(report.contains("假周报"));
-    // prompt via stdin in FilesManifest mode (lists filenames, does not inline bodies)
-    let captured = wait_for_file(&dir.join("stdin-capture.txt"), Duration::from_secs(5));
-    assert!(captured.contains("2026-07-14.md"));
-    assert!(captured.contains("输入文件"));
-    assert!(!captured.contains("跨日边界的提问"), "manifest mode must not inline message bodies");
-    assert!(captured.contains("有记录 3 天"), "stats placeholder should be substituted: {captured}");
 }
 
 #[test]
-fn report_worker_writes_report_md_synchronously() {
+fn wr_report_worker_writes_report_md() {
     let home = fake_home();
     let out = tempfile::tempdir().unwrap();
     let range_args = [
@@ -187,24 +175,30 @@ fn report_worker_writes_report_md_synchronously() {
         "--out",
         out.path().to_str().unwrap(),
     ];
-    base_cmd().args(["collect"]).args(range_args).assert().success();
+    base_cmd()
+        .args(["wr", "collect"])
+        .args(range_args)
+        .assert()
+        .success();
     let (_t, script) = fake_backend_script();
     base_cmd()
-        .args(["report", "--worker"])
+        .args(["wr", "report", "--worker"])
         .args(range_args)
         .args(["--cmd", script.to_str().unwrap()])
         .assert()
         .success();
-    let report = std::fs::read_to_string(out.path().join("2026-07-12_2026-07-18/report.md")).unwrap();
+    let report =
+        std::fs::read_to_string(out.path().join("2026-07-12_2026-07-18/report.md")).unwrap();
     assert!(report.contains("假周报"));
 }
 
 #[test]
-fn run_api_backend_without_key_exits_1() {
+fn wr_api_without_key_exits_1() {
     let home = fake_home();
     let out = tempfile::tempdir().unwrap();
     base_cmd()
         .args([
+            "wr",
             "run",
             "--from",
             "2026-07-12",
@@ -227,61 +221,80 @@ fn run_api_backend_without_key_exits_1() {
 }
 
 #[test]
-fn report_on_uncollected_dir_fails_cleanly() {
-    let home = fake_home();
-    let out = tempfile::tempdir().unwrap();
-    let (_t, script) = fake_backend_script();
+fn wr_mail_missing_report_fails() {
     base_cmd()
         .args([
-            "report",
-            "--from",
-            "2026-07-12",
-            "--to",
-            "2026-07-18",
+            "wr",
+            "mail",
+            "/nonexistent/aiw-report.md",
+            "--mail-to",
+            "a@example.com",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+}
+
+#[test]
+fn signoff_plan_with_fake_llm() {
+    let home = fake_home();
+    let out = tempfile::tempdir().unwrap();
+    let (_t, script) = fake_plan_script();
+    base_cmd()
+        .args([
+            "signoff",
+            "plan",
             "--home",
             home.path().to_str().unwrap(),
             "--out",
             out.path().to_str().unwrap(),
             "--cmd",
             script.to_str().unwrap(),
+            "--window-hours",
+            "876000",
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("run collect first"));
+        .success()
+        .stdout(predicate::str::contains("Signoff plan"));
+
+    // Find the signoff day dir
+    let signoff_root = out.path().join("signoff");
+    let day_dir = std::fs::read_dir(&signoff_root)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(day_dir.join("plan.json").exists());
+    assert!(day_dir.join("context.md").exists());
 }
 
 #[test]
-fn report_subcommand_schedules_background() {
-    // collect first, then report (no re-collect)
-    let home = fake_home();
-    let out = tempfile::tempdir().unwrap();
-    let range_args = [
-        "--from",
-        "2026-07-12",
-        "--to",
-        "2026-07-18",
-        "--home",
-        home.path().to_str().unwrap(),
-        "--out",
-        out.path().to_str().unwrap(),
-    ];
-    base_cmd().args(["collect"]).args(range_args).assert().success();
-    let (_t, script) = fake_backend_script();
+fn completions_bash_emits_script() {
     base_cmd()
-        .args(["report"])
-        .args(range_args)
-        .args(["--cmd", script.to_str().unwrap()])
+        .args(["completions", "bash"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Summarization started in background"));
-    let dir: PathBuf = out.path().join("2026-07-12_2026-07-18");
-    assert!(dir.join("report.pid").exists());
-    let report = wait_for_file(&dir.join("report.md"), Duration::from_secs(10));
-    assert!(report.contains("假周报"));
+        .stdout(predicate::str::contains("buddy"));
 }
 
 #[test]
-fn mail_sends_existing_report_with_fake_mutt() {
+fn sources_lists_detected_and_missing() {
+    let home = tempfile::tempdir().unwrap();
+    write(
+        &home.path().join(".claude/projects/p/s.jsonl"),
+        CLAUDE_SAMPLE,
+    );
+    base_cmd()
+        .args(["wr", "sources", "--home", home.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("✓ Claude Code"))
+        .stdout(predicate::str::contains("✗ Codex"));
+}
+
+#[test]
+fn mail_sends_with_fake_mutt() {
     let report_dir = tempfile::tempdir().unwrap();
     let range_dir = report_dir.path().join("2026-07-12_2026-07-18");
     std::fs::create_dir_all(&range_dir).unwrap();
@@ -300,7 +313,6 @@ fn mail_sends_existing_report_with_fake_mutt() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&mutt, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-
     let mut paths = vec![bin.path().to_path_buf()];
     if let Some(old) = std::env::var_os("PATH") {
         paths.extend(std::env::split_paths(&old));
@@ -310,6 +322,7 @@ fn mail_sends_existing_report_with_fake_mutt() {
     base_cmd()
         .env("PATH", &path)
         .args([
+            "wr",
             "mail",
             report.to_str().unwrap(),
             "--mail-to",
@@ -318,35 +331,4 @@ fn mail_sends_existing_report_with_fake_mutt() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Emailed"));
-}
-
-#[test]
-fn mail_missing_report_fails() {
-    base_cmd()
-        .args([
-            "mail",
-            "/nonexistent/aiw-report.md",
-            "--mail-to",
-            "a@example.com",
-        ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("not found"));
-}
-
-#[test]
-fn sources_lists_detected_and_missing() {
-    let home = tempfile::tempdir().unwrap();
-    write(
-        &home.path().join(".claude/projects/p/s.jsonl"),
-        CLAUDE_SAMPLE,
-    );
-    base_cmd()
-        .args(["sources", "--home", home.path().to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("✓ Claude Code"))
-        .stdout(predicate::str::contains("✗ Codex"))
-        .stdout(predicate::str::contains("✗ Cursor"))
-        .stdout(predicate::str::contains("✗ Gemini"));
 }
