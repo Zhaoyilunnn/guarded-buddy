@@ -25,6 +25,7 @@ pub struct SignoffSettings {
     pub window_hours: u64,
     pub mail_to: Vec<String>,
     pub allowed_workspaces: Vec<PathBuf>,
+    pub allow_all_workspaces: bool,
     pub max_auto_todos: usize,
     pub act_timeout_secs: u64,
     pub dry_run: bool,
@@ -39,6 +40,7 @@ impl Default for SignoffSettings {
             window_hours: 24,
             mail_to: Vec::new(),
             allowed_workspaces: Vec::new(),
+            allow_all_workspaces: false,
             max_auto_todos: 3,
             act_timeout_secs: 7200,
             dry_run: false,
@@ -156,7 +158,11 @@ pub fn run_plan(
 ) -> Result<(SignoffIngest, GatedPlan), anyhow::Error> {
     let ingest = ingest(settings)?;
     let context = std::fs::read_to_string(&ingest.context_path)?;
-    let prompt = plan_prompt(&context, &settings.allowed_workspaces);
+    let prompt = plan_prompt(
+        &context,
+        &settings.allowed_workspaces,
+        settings.allow_all_workspaces,
+    );
     let raw = run_llm(backend, &ingest.dir, &prompt, None)?;
     let plan = match parse_plan_json(&raw) {
         Ok(p) => p,
@@ -171,6 +177,7 @@ pub fn run_plan(
     let gated = gate_plan(
         plan,
         &settings.allowed_workspaces,
+        settings.allow_all_workspaces,
         settings.min_confidence,
         settings.max_auto_todos,
     );

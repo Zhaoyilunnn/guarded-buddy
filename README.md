@@ -35,7 +35,7 @@ buddy wr sources
 
 1. **Ingest** last N hours (default 24) of AI coding chats  
 2. **Plan** structured todos; model + local gate classify `auto` vs `needs_human`  
-3. **Act** only on high-confidence todos whose workspace is in `allowed_workspaces`  
+3. **Act** only on high-confidence todos whose workspace is allowlisted (or `allow_all_workspaces = true`)  
 4. **Email** summary to `[signoff].mail_to`
 
 ```sh
@@ -72,6 +72,7 @@ mail_to = ["weekly@example.com"]
 [signoff]
 window_hours = 24
 mail_to = ["me@example.com"]
+# allow_all_workspaces = true   # any workspace from context; ignores list below
 allowed_workspaces = ["/home/you/proj-a", "/home/you/proj-b"]
 max_auto_todos = 3
 act_timeout_secs = 7200

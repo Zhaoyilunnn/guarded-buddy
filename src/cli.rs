@@ -350,6 +350,7 @@ pub fn resolve_signoff_settings(
             .into_iter()
             .map(PathBuf::from)
             .collect(),
+        allow_all_workspaces: conf.allow_all_workspaces.unwrap_or(false),
         max_auto_todos: conf.max_auto_todos.unwrap_or(3),
         act_timeout_secs: conf.act_timeout_secs.unwrap_or(7200),
         dry_run: args.dry_run || conf.dry_run.unwrap_or(false),

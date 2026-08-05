@@ -42,8 +42,14 @@ pub enum PlanError {
 }
 
 /// Build the planning prompt. `allowed` workspaces are hints for the model.
-pub fn plan_prompt(context_md: &str, allowed: &[impl AsRef<Path>]) -> String {
-    let allow = if allowed.is_empty() {
+pub fn plan_prompt(
+    context_md: &str,
+    allowed: &[impl AsRef<Path>],
+    allow_all: bool,
+) -> String {
+    let allow = if allow_all {
+        "(all workspaces allowed — any absolute project path from context is fine)".to_string()
+    } else if allowed.is_empty() {
         "(none configured — mark all workspace-bound work as needs_human)".to_string()
     } else {
         allowed
@@ -51,6 +57,11 @@ pub fn plan_prompt(context_md: &str, allowed: &[impl AsRef<Path>]) -> String {
             .map(|p| format!("- {}", p.as_ref().display()))
             .collect::<Vec<_>>()
             .join("\n")
+    };
+    let auto_ws_rule = if allow_all {
+        r#"- "auto": clear goal, testable acceptance, workspace is a concrete absolute path from context, no product/legal/secret decisions, confidence >= 0.8"#
+    } else {
+        r#"- "auto": clear goal, testable acceptance, workspace is one of the allowed paths below, no product/legal/secret decisions, confidence >= 0.8"#
     };
     format!(
         r#"You are the planner for `buddy signoff` (a guarded assistant).
@@ -74,7 +85,7 @@ Produce a JSON object ONLY (no markdown fences) with this schema:
 }}
 
 Rules for autonomy:
-- "auto": clear goal, testable acceptance, workspace is one of the allowed paths below, no product/legal/secret decisions, confidence >= 0.8
+{auto_ws_rule}
 - "needs_human": ambiguous, missing path, multiple valid approaches, needs credentials/release/approval, or confidence < 0.8
 
 Allowed workspaces:
@@ -83,6 +94,7 @@ Allowed workspaces:
 --- CONTEXT ---
 {context}
 "#,
+        auto_ws_rule = auto_ws_rule,
         allow = allow,
         context = context_md
     )
@@ -113,7 +125,8 @@ pub fn parse_plan_json(raw: &str) -> Result<SignoffPlan, PlanError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Autonomy, parse_plan_json};
+    use super::{Autonomy, parse_plan_json, plan_prompt};
+    use std::path::Path;
 
     #[test]
     fn parses_plain_json() {
@@ -128,5 +141,11 @@ mod tests {
         let raw = "```json\n{\"todos\":[]}\n```";
         let plan = parse_plan_json(raw).unwrap();
         assert!(plan.todos.is_empty());
+    }
+
+    #[test]
+    fn prompt_mentions_all_when_allow_all() {
+        let p = plan_prompt("ctx", &[] as &[&Path], true);
+        assert!(p.contains("all workspaces allowed"));
     }
 }

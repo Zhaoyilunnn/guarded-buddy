@@ -42,6 +42,8 @@ pub struct SignoffConfig {
     pub window_hours: Option<u64>,
     pub mail_to: Option<Vec<String>>,
     pub allowed_workspaces: Option<Vec<String>>,
+    /// When true, any workspace path may be acted on (allowlist ignored).
+    pub allow_all_workspaces: Option<bool>,
     pub max_auto_todos: Option<usize>,
     pub act_timeout_secs: Option<u64>,
     pub dry_run: Option<bool>,
@@ -117,6 +119,7 @@ mail_to = ["weekly@example.com"]
 window_hours = 24
 mail_to = ["me@example.com"]
 allowed_workspaces = ["/tmp/proj"]
+allow_all_workspaces = true
 max_auto_todos = 2
 act_timeout_secs = 7200
 dry_run = true
@@ -135,6 +138,7 @@ dry_run = true
             config.signoff.mail_to.as_deref(),
             Some(["me@example.com".to_string()].as_slice())
         );
+        assert_eq!(config.signoff.allow_all_workspaces, Some(true));
         assert_eq!(config.signoff.act_timeout_secs, Some(7200));
         assert_eq!(config.signoff.dry_run, Some(true));
     }
