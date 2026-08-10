@@ -2,9 +2,11 @@
 
 mod plan;
 mod policy;
+mod trust;
 
 pub use plan::{SignoffPlan, SignoffTodo, parse_plan_json, plan_prompt};
 pub use policy::{GatedPlan, gate_plan};
+pub use trust::{WorkspaceTrust, WorkspaceTrustEntry, preset_for_act, trust_for};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -24,8 +26,7 @@ use crate::sources;
 pub struct SignoffSettings {
     pub window_hours: u64,
     pub mail_to: Vec<String>,
-    pub allowed_workspaces: Vec<PathBuf>,
-    pub allow_all_workspaces: bool,
+    pub workspaces: Vec<WorkspaceTrustEntry>,
     pub max_auto_todos: usize,
     pub act_timeout_secs: u64,
     pub dry_run: bool,
@@ -39,8 +40,7 @@ impl Default for SignoffSettings {
         Self {
             window_hours: 24,
             mail_to: Vec::new(),
-            allowed_workspaces: Vec::new(),
-            allow_all_workspaces: false,
+            workspaces: Vec::new(),
             max_auto_todos: 3,
             act_timeout_secs: 7200,
             dry_run: false,
@@ -48,6 +48,12 @@ impl Default for SignoffSettings {
             out_dir: PathBuf::from("out"),
             home: PathBuf::from("."),
         }
+    }
+}
+
+impl SignoffSettings {
+    pub fn trust_for(&self, workspace: &Path) -> WorkspaceTrust {
+        trust_for(workspace, &self.workspaces)
     }
 }
 
@@ -126,6 +132,7 @@ fn run_llm(
     cwd: &Path,
     text: &str,
     timeout_secs: Option<u64>,
+    act_trust: Option<WorkspaceTrust>,
 ) -> Result<String, ReportError> {
     let timeout = timeout_secs.unwrap_or(backend.timeout_secs);
     let prompt = Prompt {
@@ -136,8 +143,13 @@ fn run_llm(
         BackendKind::Cli => {
             let spec = match &backend.cli_cmd {
                 Some(cmd) => parse_custom_cmd(cmd)?,
-                None => preset(&backend.cli_name)
-                    .ok_or_else(|| ReportError::UnknownCliPreset(backend.cli_name.clone()))?,
+                None => match act_trust {
+                    Some(trust) => preset_for_act(&backend.cli_name, trust).ok_or_else(|| {
+                        ReportError::UnknownCliPreset(backend.cli_name.clone())
+                    })?,
+                    None => preset(&backend.cli_name)
+                        .ok_or_else(|| ReportError::UnknownCliPreset(backend.cli_name.clone()))?,
+                },
             };
             CliSummarizer::new(spec, Duration::from_secs(timeout)).summarize(&prompt)
         }
@@ -158,29 +170,19 @@ pub fn run_plan(
 ) -> Result<(SignoffIngest, GatedPlan), anyhow::Error> {
     let ingest = ingest(settings)?;
     let context = std::fs::read_to_string(&ingest.context_path)?;
-    let prompt = plan_prompt(
-        &context,
-        &settings.allowed_workspaces,
-        settings.allow_all_workspaces,
-    );
-    let raw = run_llm(backend, &ingest.dir, &prompt, None)?;
+    let prompt = plan_prompt(&context, &settings.workspaces);
+    let raw = run_llm(backend, &ingest.dir, &prompt, None, None)?;
     let plan = match parse_plan_json(&raw) {
         Ok(p) => p,
         Err(_) => {
             let retry = format!(
                 "Your previous answer was not valid JSON. Reply with ONLY a JSON object matching the schema.\n\nPrevious output:\n{raw}"
             );
-            let raw2 = run_llm(backend, &ingest.dir, &retry, None)?;
+            let raw2 = run_llm(backend, &ingest.dir, &retry, None, None)?;
             parse_plan_json(&raw2)?
         }
     };
-    let gated = gate_plan(
-        plan,
-        &settings.allowed_workspaces,
-        settings.allow_all_workspaces,
-        settings.min_confidence,
-        settings.max_auto_todos,
-    );
+    let gated = gate_plan(plan, settings.min_confidence, settings.max_auto_todos);
     std::fs::write(
         ingest.dir.join("plan.json"),
         serde_json::to_string_pretty(&gated).unwrap(),
@@ -196,12 +198,26 @@ pub struct ActResult {
     pub detail: String,
 }
 
+const ACT_STATUS_COMPLETED: &str = "BUDDY_SIGNOFF_STATUS: completed";
+const ACT_STATUS_INCOMPLETE: &str = "BUDDY_SIGNOFF_STATUS: incomplete";
+
+fn act_status(output: &str) -> Result<(), &'static str> {
+    match output.lines().rev().find(|line| !line.trim().is_empty()) {
+        Some(line) if line.trim() == ACT_STATUS_COMPLETED => Ok(()),
+        Some(line) if line.trim() == ACT_STATUS_INCOMPLETE => {
+            Err("agent reported that the task is incomplete")
+        }
+        _ => Err("agent did not report a valid completion status"),
+    }
+}
+
 /// Run CLI agent on one auto todo inside its workspace.
 pub fn act_one(
     backend: &EffectiveBackend,
     todo: &SignoffTodo,
     actions_dir: &Path,
     timeout_secs: u64,
+    trust: WorkspaceTrust,
 ) -> ActResult {
     let id = todo.id.clone();
     let log_path = actions_dir.join(format!("{id}.log"));
@@ -236,21 +252,36 @@ Constraints:
 - Do NOT force-push, rewrite git history, or change global git config.
 - Do NOT read or write secrets / .env with real credentials.
 - Stay inside this workspace.
-- When done, print a short summary of what you changed.
+- Print a short summary of what you changed.
+- Your final non-empty line MUST be exactly one of:
+  BUDDY_SIGNOFF_STATUS: completed
+  BUDDY_SIGNOFF_STATUS: incomplete
+- Use "incomplete" if you could not finish the todo or verify its acceptance criteria.
 "#,
         title = todo.title,
         detail = todo.detail,
         acceptance = todo.acceptance,
     );
 
-    match run_llm(backend, &ws_path, &prompt_text, Some(timeout_secs)) {
+    match run_llm(
+        backend,
+        &ws_path,
+        &prompt_text,
+        Some(timeout_secs),
+        Some(trust),
+    ) {
         Ok(out) => {
             let _ = std::fs::write(&log_path, &out);
+            let status = act_status(&out);
+            let detail = match status {
+                Ok(()) => out.chars().take(500).collect(),
+                Err(reason) => format!("{reason}\n\n{}", out.chars().take(500).collect::<String>()),
+            };
             ActResult {
                 id,
-                ok: true,
+                ok: status.is_ok(),
                 log_path,
-                detail: out.chars().take(500).collect(),
+                detail,
             }
         }
         Err(e) => {
@@ -343,12 +374,23 @@ pub fn run_full(
     let mut acts = Vec::new();
     if !settings.dry_run {
         for todo in &gated.auto {
-            eprintln!("signoff: acting on {} …", todo.id);
+            let trust = todo
+                .workspace
+                .as_deref()
+                .map(Path::new)
+                .map(|p| settings.trust_for(p))
+                .unwrap_or_default();
+            eprintln!(
+                "signoff: acting on {} (trust={}) …",
+                todo.id,
+                trust.as_str()
+            );
             acts.push(act_one(
                 backend,
                 todo,
                 &actions_dir,
                 settings.act_timeout_secs,
+                trust,
             ));
         }
     }
@@ -362,4 +404,161 @@ pub fn run_full(
 
 pub fn mail_subject_for_day(day: NaiveDate) -> String {
     format!("buddy signoff {day}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan::Autonomy;
+    use super::{ActResult, GatedPlan, SignoffTodo, WorkspaceTrust, act_one, render_signoff_md};
+    use crate::cli::{BackendKind, EffectiveBackend};
+    use chrono::NaiveDate;
+    use std::path::{Path, PathBuf};
+
+    fn fake_script(body: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fake-agent.sh");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (tmp, path)
+    }
+
+    fn backend(script: &Path) -> EffectiveBackend {
+        EffectiveBackend {
+            kind: BackendKind::Cli,
+            cli_name: "unused".into(),
+            cli_cmd: Some(script.display().to_string()),
+            template: None,
+            api_base_url: String::new(),
+            api_key_env: String::new(),
+            api_model: String::new(),
+            timeout_secs: 5,
+            mail_to: Vec::new(),
+            worker: false,
+        }
+    }
+
+    fn todo(workspace: &Path) -> SignoffTodo {
+        SignoffTodo {
+            id: "t1".into(),
+            title: "fix signoff".into(),
+            detail: "make the change".into(),
+            autonomy: Autonomy::Auto,
+            confidence: 1.0,
+            needs_human_reason: None,
+            workspace: Some(workspace.display().to_string()),
+            acceptance: "tests pass".into(),
+            evidence: Vec::new(),
+        }
+    }
+
+    fn rendered(todo: SignoffTodo, result: ActResult) -> String {
+        let plan = GatedPlan {
+            auto: vec![todo],
+            needs_human: Vec::new(),
+            deferred: Vec::new(),
+        };
+        render_signoff_md(
+            NaiveDate::from_ymd_opt(2026, 8, 6).unwrap(),
+            &plan,
+            &[result],
+            false,
+        )
+    }
+
+    #[test]
+    fn completed_agent_report_is_marked_ok() {
+        let workspace = tempfile::tempdir().unwrap();
+        let actions = tempfile::tempdir().unwrap();
+        let (_script_dir, script) = fake_script(
+            "cat > /dev/null\nprintf 'Implemented the fix and tests pass.\\nBUDDY_SIGNOFF_STATUS: completed\\n'",
+        );
+        let todo = todo(workspace.path());
+
+        let result = act_one(
+            &backend(&script),
+            &todo,
+            actions.path(),
+            5,
+            WorkspaceTrust::Yolo,
+        );
+
+        assert!(result.ok, "{}", result.detail);
+        assert!(rendered(todo, result).contains("[ok]"));
+    }
+
+    #[test]
+    fn exit_zero_incomplete_agent_report_is_marked_failed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let actions = tempfile::tempdir().unwrap();
+        let (_script_dir, script) = fake_script(
+            "cat > /dev/null\nprintf 'I could not complete the task.\\nBUDDY_SIGNOFF_STATUS: incomplete\\n'\nexit 0",
+        );
+        let todo = todo(workspace.path());
+
+        let result = act_one(
+            &backend(&script),
+            &todo,
+            actions.path(),
+            5,
+            WorkspaceTrust::Yolo,
+        );
+
+        assert!(
+            !result.ok,
+            "exit code 0 must not override an incomplete report"
+        );
+        let md = rendered(todo, result);
+        assert!(md.contains("[failed]"));
+        assert!(!md.contains("[ok]"));
+    }
+
+    #[test]
+    fn exit_zero_without_completion_status_is_marked_failed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let actions = tempfile::tempdir().unwrap();
+        let (_script_dir, script) = fake_script(
+            "cat > /dev/null\nprintf 'I made some changes, but gave no final status.\\n'",
+        );
+        let todo = todo(workspace.path());
+
+        let result = act_one(
+            &backend(&script),
+            &todo,
+            actions.path(),
+            5,
+            WorkspaceTrust::Yolo,
+        );
+
+        assert!(!result.ok);
+        assert!(
+            result.detail.contains("valid completion status"),
+            "{}",
+            result.detail
+        );
+        assert!(rendered(todo, result).contains("[failed]"));
+    }
+
+    #[test]
+    fn timed_out_agent_is_marked_failed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let actions = tempfile::tempdir().unwrap();
+        let (_script_dir, script) = fake_script("while :; do :; done");
+        let todo = todo(workspace.path());
+
+        let result = act_one(
+            &backend(&script),
+            &todo,
+            actions.path(),
+            0,
+            WorkspaceTrust::Yolo,
+        );
+
+        assert!(!result.ok);
+        assert!(result.detail.contains("timed out"), "{}", result.detail);
+        assert!(rendered(todo, result).contains("[failed]"));
+    }
 }

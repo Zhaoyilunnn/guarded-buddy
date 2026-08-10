@@ -35,7 +35,7 @@ buddy wr sources
 
 1. **Ingest** last N hours (default 24) of AI coding chats  
 2. **Plan** structured todos; model + local gate classify `auto` vs `needs_human`  
-3. **Act** only on high-confidence todos whose workspace is allowlisted (or `allow_all_workspaces = true`)  
+3. **Act** on high-confidence todos; Codex sandbox flags come from per-workspace `trust` (default `yolo`)  
 4. **Email** summary to `[signoff].mail_to`
 
 ```sh
@@ -72,12 +72,26 @@ mail_to = ["weekly@example.com"]
 [signoff]
 window_hours = 24
 mail_to = ["me@example.com"]
-# allow_all_workspaces = true   # any workspace from context; ignores list below
-allowed_workspaces = ["/home/you/proj-a", "/home/you/proj-b"]
 max_auto_todos = 3
 act_timeout_secs = 7200
 dry_run = false
+
+# Optional trust overrides for act (unlisted paths default to yolo):
+# yolo | workspace-write | read-only
+[[signoff.workspaces]]
+path = "/home/you/proj-a"
+trust = "workspace-write"
+
+[[signoff.workspaces]]
+path = "/home/you/proj-b"
+trust = "yolo"
 ```
+
+| `trust` | Codex act flags |
+|---------|-----------------|
+| `yolo` (default) | `--dangerously-bypass-approvals-and-sandbox` |
+| `workspace-write` | `-s workspace-write` |
+| `read-only` | `-s read-only` |
 
 Priority: **CLI flag > config > defaults**. `wr` and `signoff` use **separate** `mail_to` lists.
 

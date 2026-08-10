@@ -19,7 +19,7 @@ pub struct CliSpec {
     pub stdin_prompt: bool,
 }
 
-/// Built-in presets: all non-interactive.
+/// Built-in presets: all non-interactive (plan / wr).
 pub fn preset(name: &str) -> Option<CliSpec> {
     let (program, args, stdin_prompt) = match name {
         // --skip-git-repo-check: cwd is out/<range>/ (not a git trust root).

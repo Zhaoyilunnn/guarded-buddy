@@ -7,7 +7,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::config::Config;
 use crate::domain::{AgentKind, DateRange, DomainError};
-use crate::signoff::SignoffSettings;
+use crate::signoff::{SignoffSettings, WorkspaceTrustEntry};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -335,6 +335,16 @@ pub fn resolve_signoff_settings(
         .as_deref()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.8);
+    let workspaces = conf
+        .workspaces
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| WorkspaceTrustEntry {
+            path: PathBuf::from(e.path),
+            trust: e.trust,
+        })
+        .collect();
     SignoffSettings {
         window_hours: args.window_hours.or(conf.window_hours).unwrap_or(24),
         mail_to: args
@@ -343,14 +353,7 @@ pub fn resolve_signoff_settings(
             .clone()
             .or_else(|| conf.mail_to.clone())
             .unwrap_or_default(),
-        allowed_workspaces: conf
-            .allowed_workspaces
-            .clone()
-            .unwrap_or_default()
-            .into_iter()
-            .map(PathBuf::from)
-            .collect(),
-        allow_all_workspaces: conf.allow_all_workspaces.unwrap_or(false),
+        workspaces,
         max_auto_todos: conf.max_auto_todos.unwrap_or(3),
         act_timeout_secs: conf.act_timeout_secs.unwrap_or(7200),
         dry_run: args.dry_run || conf.dry_run.unwrap_or(false),

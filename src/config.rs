@@ -41,13 +41,20 @@ pub struct WrConfig {
 pub struct SignoffConfig {
     pub window_hours: Option<u64>,
     pub mail_to: Option<Vec<String>>,
-    pub allowed_workspaces: Option<Vec<String>>,
-    /// When true, any workspace path may be acted on (allowlist ignored).
-    pub allow_all_workspaces: Option<bool>,
+    /// Per-workspace trust overrides; unlisted paths default to `yolo`.
+    pub workspaces: Option<Vec<WorkspaceTrustConfig>>,
     pub max_auto_todos: Option<usize>,
     pub act_timeout_secs: Option<u64>,
     pub dry_run: Option<bool>,
     pub min_confidence: Option<String>,
+}
+
+/// One `[[signoff.workspaces]]` entry.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceTrustConfig {
+    pub path: String,
+    #[serde(default)]
+    pub trust: crate::signoff::WorkspaceTrust,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -118,11 +125,13 @@ mail_to = ["weekly@example.com"]
 [signoff]
 window_hours = 24
 mail_to = ["me@example.com"]
-allowed_workspaces = ["/tmp/proj"]
-allow_all_workspaces = true
 max_auto_todos = 2
 act_timeout_secs = 7200
 dry_run = true
+
+[[signoff.workspaces]]
+path = "/tmp/proj"
+trust = "workspace-write"
 "#,
         )
         .unwrap();
@@ -138,7 +147,13 @@ dry_run = true
             config.signoff.mail_to.as_deref(),
             Some(["me@example.com".to_string()].as_slice())
         );
-        assert_eq!(config.signoff.allow_all_workspaces, Some(true));
+        let ws = config.signoff.workspaces.as_ref().unwrap();
+        assert_eq!(ws.len(), 1);
+        assert_eq!(ws[0].path, "/tmp/proj");
+        assert_eq!(
+            ws[0].trust,
+            crate::signoff::WorkspaceTrust::WorkspaceWrite
+        );
         assert_eq!(config.signoff.act_timeout_secs, Some(7200));
         assert_eq!(config.signoff.dry_run, Some(true));
     }

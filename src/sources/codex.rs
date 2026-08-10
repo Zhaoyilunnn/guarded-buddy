@@ -1,7 +1,9 @@
 //! Codex CLI data source: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
 //!
-//! Deduplication strategy: consume only `user_message` / `agent_message` inside `type == "event_msg"`,
-//! completely ignore `response_item` (its messages duplicate event_msg).
+//! Message extraction (newer CLIs dropped chat from `event_msg`):
+//! 1. Prefer `event_msg` → `user_message` / `agent_message` (legacy, deduped vs `response_item`).
+//! 2. If none, fall back to `response_item` → `message` with `role` user/assistant
+//!    (skip developer, injected context, and collab `agent_message` items).
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -105,7 +107,8 @@ pub(crate) fn parse_session_lines<I: Iterator<Item = String>>(
     fallback_id: &str,
 ) -> ParseOutcome {
     let mut bad_lines = Vec::new();
-    let mut messages = Vec::new();
+    let mut from_event = Vec::new();
+    let mut from_response = Vec::new();
     let mut session_id: Option<String> = None;
     let mut cwd: Option<String> = None;
     let mut started_at: Option<DateTime<Local>> = None;
@@ -115,7 +118,7 @@ pub(crate) fn parse_session_lines<I: Iterator<Item = String>>(
         if line.is_empty() {
             continue;
         }
-        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
             bad_lines.push(idx + 1);
             continue;
         };
@@ -142,35 +145,26 @@ pub(crate) fn parse_session_lines<I: Iterator<Item = String>>(
                 }
             }
             Some("event_msg") => {
-                let payload = record.get("payload").unwrap_or(&serde_json::Value::Null);
-                let role = match payload.get("type").and_then(|t| t.as_str()) {
-                    Some("user_message") => Role::User,
-                    Some("agent_message") => Role::Assistant,
-                    _ => continue,
-                };
-                let Some(text) = payload.get("message").and_then(|m| m.as_str()) else {
-                    continue;
-                };
-                if text.trim().is_empty() {
-                    continue;
+                if let Some(msg) = message_from_event_msg(&record) {
+                    from_event.push(msg);
                 }
-                let Some(ts) = record
-                    .get("timestamp")
-                    .and_then(|v| v.as_str())
-                    .and_then(parse_iso)
-                else {
-                    continue;
-                };
-                messages.push(Message {
-                    role,
-                    timestamp: ts,
-                    content: MessageContent::Text(cap_ingest(text)),
-                });
             }
-            // response_item / turn_context / world_state / token_count etc. are ignored
+            Some("response_item") => {
+                if let Some(msg) = message_from_response_item(&record) {
+                    from_response.push(msg);
+                }
+            }
+            // turn_context / world_state / token_count etc. are ignored
             _ => {}
         }
     }
+
+    // Legacy rollouts duplicate chat in response_item; prefer event_msg when present.
+    let messages = if !from_event.is_empty() {
+        from_event
+    } else {
+        from_response
+    };
 
     if messages.is_empty() {
         return ParseOutcome {
@@ -192,6 +186,95 @@ pub(crate) fn parse_session_lines<I: Iterator<Item = String>>(
     }
 }
 
+fn message_from_event_msg(record: &serde_json::Value) -> Option<Message> {
+    let payload = record.get("payload")?;
+    let role = match payload.get("type").and_then(|t| t.as_str()) {
+        Some("user_message") => Role::User,
+        Some("agent_message") => Role::Assistant,
+        _ => return None,
+    };
+    let text = payload.get("message").and_then(|m| m.as_str())?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    let ts = record
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .and_then(parse_iso)?;
+    Some(Message {
+        role,
+        timestamp: ts,
+        content: MessageContent::Text(cap_ingest(text)),
+    })
+}
+
+fn message_from_response_item(record: &serde_json::Value) -> Option<Message> {
+    let payload = record.get("payload")?;
+    // Collab / subagent envelopes — not the primary user↔assistant thread.
+    if payload.get("type").and_then(|t| t.as_str()) == Some("agent_message") {
+        return None;
+    }
+    if payload.get("type").and_then(|t| t.as_str()) != Some("message") {
+        return None;
+    }
+    let role = match payload.get("role").and_then(|r| r.as_str()) {
+        Some("user") => Role::User,
+        Some("assistant") => Role::Assistant,
+        _ => return None, // developer / system / etc.
+    };
+    let text = join_message_content(payload.get("content")?)?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    if role == Role::User && is_injected_user_context(&text) {
+        return None;
+    }
+    let ts = record
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .and_then(parse_iso)?;
+    Some(Message {
+        role,
+        timestamp: ts,
+        content: MessageContent::Text(cap_ingest(&text)),
+    })
+}
+
+fn join_message_content(content: &serde_json::Value) -> Option<String> {
+    let parts = content.as_array()?;
+    let mut out = String::new();
+    for part in parts {
+        let kind = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if !matches!(kind, "input_text" | "output_text" | "text") {
+            continue;
+        }
+        let Some(text) = part.get("text").and_then(|t| t.as_str()) else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(text);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Drop automatic context blocks that newer Codex injects as `role=user` messages.
+fn is_injected_user_context(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with("<environment_context>")
+        || t.starts_with("<permissions instructions>")
+        || t.starts_with("# AGENTS.md instructions")
+        || t.starts_with("<INSTRUCTIONS>")
+}
+
 /// ISO8601/RFC3339 (UTC) → local timezone.
 fn parse_iso(s: &str) -> Option<DateTime<Local>> {
     DateTime::parse_from_rfc3339(s)
@@ -206,6 +289,8 @@ mod tests {
     use chrono::{DateTime, NaiveDate};
 
     const SAMPLE: &str = include_str!("../../tests/fixtures/codex/rollout-sample.jsonl");
+    const SAMPLE_V2: &str =
+        include_str!("../../tests/fixtures/codex/rollout-v2-response-item-only.jsonl");
     const MALFORMED: &str = include_str!("../../tests/fixtures/codex/rollout-malformed.jsonl");
 
     fn d(s: &str) -> NaiveDate {
@@ -252,17 +337,44 @@ mod tests {
     }
 
     #[test]
-    fn ignores_response_item_and_world_state_lines() {
-        // if response_item were parsed, message count would double (fixture has a copy for each event_msg)
+    fn ignores_response_item_when_event_msg_present() {
+        // if response_item were also parsed, message count would double
         let outcome = parse_session_lines(SAMPLE.lines().map(str::to_string), "x");
         let session = outcome.session.unwrap();
         let texts: Vec<&str> = session.messages.iter().filter_map(|m| m.text()).collect();
         assert_eq!(
-            texts.iter().filter(|t| **t == "我先定位登录接口的鉴权中间件。").count(),
+            texts
+                .iter()
+                .filter(|t| **t == "我先定位登录接口的鉴权中间件。")
+                .count(),
             1,
-            "response_item duplicates must not be ingested"
+            "response_item duplicates must not be ingested when event_msg exists"
         );
         assert!(!texts.iter().any(|t| t.contains("environment_context")));
+        assert!(!texts.iter().any(|t| t.contains("permissions instructions")));
+    }
+
+    #[test]
+    fn v2_response_item_only_rollout_extracts_chat() {
+        let outcome = parse_session_lines(SAMPLE_V2.lines().map(str::to_string), "fallback");
+        let session = outcome.session.expect("v2 session should parse");
+        assert_eq!(session.id, "019fe58e-aaaa-bbbb-cccc-ddddeeeeffff");
+        assert_eq!(session.project, "/mnt/d/Research/XQ");
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(session.messages[0].role, Role::User);
+        assert!(session.messages[0]
+            .text()
+            .unwrap()
+            .contains("09-future-supercomputer.html"));
+        assert_eq!(session.messages[1].role, Role::Assistant);
+        assert!(session.messages[1].text().unwrap().contains("先读当前愿景页"));
+        assert_eq!(session.messages[2].role, Role::Assistant);
+        assert!(session.messages[2].text().unwrap().contains("已完成路径对比小修"));
+
+        let texts: Vec<&str> = session.messages.iter().filter_map(|m| m.text()).collect();
+        assert!(!texts.iter().any(|t| t.contains("environment_context")));
+        assert!(!texts.iter().any(|t| t.contains("AGENTS.md instructions")));
+        assert!(!texts.iter().any(|t| t.contains("Subagent noise")));
         assert!(!texts.iter().any(|t| t.contains("permissions instructions")));
     }
 
@@ -276,10 +388,11 @@ mod tests {
     }
 
     #[test]
-    fn session_without_event_msgs_returns_none() {
+    fn session_without_chat_messages_returns_none() {
         let lines = vec![
             "{\"timestamp\":\"2026-07-15T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s\",\"cwd\":\"/p\"}}".to_string(),
             "{\"timestamp\":\"2026-07-15T00:00:01Z\",\"type\":\"turn_context\",\"payload\":{}}".to_string(),
+            "{\"timestamp\":\"2026-07-15T00:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}".to_string(),
         ];
         let outcome = parse_session_lines(lines.into_iter(), "x");
         assert!(outcome.session.is_none());

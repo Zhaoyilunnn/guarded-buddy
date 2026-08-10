@@ -1,7 +1,5 @@
 //! Local autonomy gate after LLM planning.
 
-use std::path::{Path, PathBuf};
-
 use serde::Serialize;
 
 use super::plan::{Autonomy, SignoffPlan, SignoffTodo};
@@ -13,27 +11,9 @@ pub struct GatedPlan {
     pub deferred: Vec<SignoffTodo>,
 }
 
-fn workspace_allowed(ws: &str, allowed: &[PathBuf], allow_all: bool) -> bool {
-    if allow_all {
-        return true;
-    }
-    if allowed.is_empty() {
-        return false;
-    }
-    let path = Path::new(ws);
-    allowed
-        .iter()
-        .any(|a| path == a.as_path() || path.starts_with(a))
-}
-
-/// Apply hard gates: confidence, allowlist (unless allow_all), max auto count.
-pub fn gate_plan(
-    plan: SignoffPlan,
-    allowed: &[PathBuf],
-    allow_all: bool,
-    min_confidence: f64,
-    max_auto: usize,
-) -> GatedPlan {
+/// Apply hard gates: confidence, missing workspace, max auto count.
+/// Workspace allowlisting was removed; trust only affects act CLI sandbox flags.
+pub fn gate_plan(plan: SignoffPlan, min_confidence: f64, max_auto: usize) -> GatedPlan {
     let mut auto = Vec::new();
     let mut needs_human = Vec::new();
     let mut deferred = Vec::new();
@@ -54,15 +34,9 @@ pub fn gate_plan(
             needs_human.push(todo);
             continue;
         }
-        let Some(ws) = todo.workspace.clone() else {
+        if todo.workspace.is_none() {
             todo.autonomy = Autonomy::NeedsHuman;
             todo.needs_human_reason = Some("missing workspace".into());
-            needs_human.push(todo);
-            continue;
-        };
-        if !workspace_allowed(&ws, allowed, allow_all) {
-            todo.autonomy = Autonomy::NeedsHuman;
-            todo.needs_human_reason = Some("workspace not in allowed_workspaces".into());
             needs_human.push(todo);
             continue;
         }
@@ -84,7 +58,6 @@ pub fn gate_plan(
 mod tests {
     use super::gate_plan;
     use crate::signoff::plan::{Autonomy, SignoffPlan, SignoffTodo};
-    use std::path::PathBuf;
 
     fn todo(id: &str, auto: bool, conf: f64, ws: Option<&str>) -> SignoffTodo {
         SignoffTodo {
@@ -105,23 +78,23 @@ mod tests {
     }
 
     #[test]
-    fn demotes_outside_allowlist() {
-        let plan = SignoffPlan {
-            todos: vec![todo("t1", true, 0.95, Some("/tmp/other"))],
-        };
-        let gated = gate_plan(plan, &[PathBuf::from("/tmp/allowed")], false, 0.8, 3);
-        assert!(gated.auto.is_empty());
-        assert_eq!(gated.needs_human.len(), 1);
-    }
-
-    #[test]
-    fn allow_all_accepts_any_workspace() {
+    fn accepts_any_workspace_path() {
         let plan = SignoffPlan {
             todos: vec![todo("t1", true, 0.95, Some("/tmp/anywhere"))],
         };
-        let gated = gate_plan(plan, &[], true, 0.8, 3);
+        let gated = gate_plan(plan, 0.8, 3);
         assert_eq!(gated.auto.len(), 1);
         assert!(gated.needs_human.is_empty());
+    }
+
+    #[test]
+    fn demotes_missing_workspace() {
+        let plan = SignoffPlan {
+            todos: vec![todo("t1", true, 0.95, None)],
+        };
+        let gated = gate_plan(plan, 0.8, 3);
+        assert!(gated.auto.is_empty());
+        assert_eq!(gated.needs_human.len(), 1);
     }
 
     #[test]
@@ -133,7 +106,7 @@ mod tests {
                 todo("t3", true, 0.9, Some("/tmp/p")),
             ],
         };
-        let gated = gate_plan(plan, &[PathBuf::from("/tmp/p")], false, 0.8, 2);
+        let gated = gate_plan(plan, 0.8, 2);
         assert_eq!(gated.auto.len(), 2);
         assert_eq!(gated.deferred.len(), 1);
     }

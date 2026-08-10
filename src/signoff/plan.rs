@@ -1,8 +1,8 @@
 //! LLM plan JSON for signoff todos.
 
-use std::path::Path;
-
 use serde::{Deserialize, Serialize};
+
+use super::trust::{WorkspaceTrust, WorkspaceTrustEntry};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -41,27 +41,17 @@ pub enum PlanError {
     Parse(String),
 }
 
-/// Build the planning prompt. `allowed` workspaces are hints for the model.
-pub fn plan_prompt(
-    context_md: &str,
-    allowed: &[impl AsRef<Path>],
-    allow_all: bool,
-) -> String {
-    let allow = if allow_all {
-        "(all workspaces allowed — any absolute project path from context is fine)".to_string()
-    } else if allowed.is_empty() {
-        "(none configured — mark all workspace-bound work as needs_human)".to_string()
+/// Build the planning prompt. Configured trusts are hints; unlisted paths default to yolo.
+pub fn plan_prompt(context_md: &str, workspaces: &[WorkspaceTrustEntry]) -> String {
+    let trust_hint = if workspaces.is_empty() {
+        "(none configured — every concrete absolute path defaults to trust=yolo at act time)"
+            .to_string()
     } else {
-        allowed
+        workspaces
             .iter()
-            .map(|p| format!("- {}", p.as_ref().display()))
+            .map(|e| format!("- {} → {}", e.path.display(), e.trust.as_str()))
             .collect::<Vec<_>>()
             .join("\n")
-    };
-    let auto_ws_rule = if allow_all {
-        r#"- "auto": clear goal, testable acceptance, workspace is a concrete absolute path from context, no product/legal/secret decisions, confidence >= 0.8"#
-    } else {
-        r#"- "auto": clear goal, testable acceptance, workspace is one of the allowed paths below, no product/legal/secret decisions, confidence >= 0.8"#
     };
     format!(
         r#"You are the planner for `buddy signoff` (a guarded assistant).
@@ -85,17 +75,17 @@ Produce a JSON object ONLY (no markdown fences) with this schema:
 }}
 
 Rules for autonomy:
-{auto_ws_rule}
+- "auto": clear goal, testable acceptance, workspace is a concrete absolute path from context, no product/legal/secret decisions, confidence >= 0.8
 - "needs_human": ambiguous, missing path, multiple valid approaches, needs credentials/release/approval, or confidence < 0.8
 
-Allowed workspaces:
-{allow}
+Configured workspace trusts (unlisted paths default to {default_trust} when the agent runs):
+{trust_hint}
 
 --- CONTEXT ---
 {context}
 "#,
-        auto_ws_rule = auto_ws_rule,
-        allow = allow,
+        default_trust = WorkspaceTrust::Yolo.as_str(),
+        trust_hint = trust_hint,
         context = context_md
     )
 }
@@ -126,7 +116,8 @@ pub fn parse_plan_json(raw: &str) -> Result<SignoffPlan, PlanError> {
 #[cfg(test)]
 mod tests {
     use super::{Autonomy, parse_plan_json, plan_prompt};
-    use std::path::Path;
+    use crate::signoff::trust::{WorkspaceTrust, WorkspaceTrustEntry};
+    use std::path::PathBuf;
 
     #[test]
     fn parses_plain_json() {
@@ -144,8 +135,19 @@ mod tests {
     }
 
     #[test]
-    fn prompt_mentions_all_when_allow_all() {
-        let p = plan_prompt("ctx", &[] as &[&Path], true);
-        assert!(p.contains("all workspaces allowed"));
+    fn prompt_mentions_default_yolo() {
+        let p = plan_prompt("ctx", &[]);
+        assert!(p.contains("defaults to trust=yolo"));
+    }
+
+    #[test]
+    fn prompt_lists_configured_trusts() {
+        let entries = [WorkspaceTrustEntry {
+            path: PathBuf::from("/tmp/proj"),
+            trust: WorkspaceTrust::WorkspaceWrite,
+        }];
+        let p = plan_prompt("ctx", &entries);
+        assert!(p.contains("/tmp/proj"));
+        assert!(p.contains("workspace-write"));
     }
 }
