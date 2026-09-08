@@ -8,6 +8,7 @@ Binary: **`buddy`**
 
 ```text
 buddy
+├── sync                     # archive local chat history to a shared directory
 ├── wr | weekly-report     # weekly AI chat report
 │   ├── collect | report | run
 │   ├── mail <report.md>
@@ -30,6 +31,25 @@ buddy wr report --days 7
 buddy wr mail out/2026-07-12_2026-07-18/report.md
 buddy wr sources
 ```
+
+When `[sync]` is configured, `buddy wr run` first archives this device and then
+collects from every archived device plus the live local home. Use `--no-sync`
+only when the shared directory is temporarily unavailable.
+
+### `sync` — cross-device conversation archive
+
+`buddy sync` incrementally copies only supported raw conversation-history files.
+Each device writes to its own namespace; source deletions are never propagated.
+
+```sh
+buddy sync
+buddy sync --agents codex,claude
+```
+
+Raw conversations can contain source code, filesystem paths, prompts, and
+secrets. Choose a trusted sync directory; buddy does not encrypt the archive.
+
+Detailed behavior and sequence diagram: [docs/buddy-sync.md](docs/buddy-sync.md).
 
 ### `signoff` — end of day
 
@@ -68,6 +88,10 @@ timeout_secs = 600
 [wr]
 days = 7
 mail_to = ["weekly@example.com"]
+
+[sync]
+path = "/path/to/Nutstore/buddy-history"
+device = "work-laptop"          # unique and stable on every device
 
 [signoff]
 window_hours = 24

@@ -12,4 +12,5 @@ pub mod report;
 pub mod secrets;
 pub mod signoff;
 pub mod sources;
+pub mod sync;
 pub mod template;

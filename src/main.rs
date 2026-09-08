@@ -3,6 +3,7 @@
 use std::io::Write;
 use std::path::Path;
 
+use anyhow::Context;
 use buddy::app;
 use buddy::cli::{
     self, Cli, Command, ShellKind, SignoffCommand, WrCommand, resolve_signoff_settings,
@@ -12,7 +13,6 @@ use buddy::job::{self, mail_subject, mail_subject_for_report_path};
 use buddy::mail::{self, mutt_available, mutt_missing_hint};
 use buddy::signoff::{self, mail_subject_for_day};
 use buddy::sources::default_sources;
-use anyhow::Context;
 use chrono::Local;
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
@@ -24,6 +24,10 @@ fn main() -> anyhow::Result<()> {
     let today = Local::now().date_naive();
 
     match cli.command {
+        Command::Sync(args) => {
+            let settings = cli::resolve_sync(&args, &config, &default_home)?;
+            run_sync(&settings)?;
+        }
         Command::Completions(args) => {
             let mut cmd = Cli::command();
             let shell = match args.shell {
@@ -47,7 +51,8 @@ fn main() -> anyhow::Result<()> {
             }
             WrCommand::Collect(args) => {
                 let common = cli::resolve_common(&args.common, &config, today, &default_home)?;
-                let outcome = app::collect_into(&common)?;
+                let archive = configured_archive(&config, &common)?;
+                let outcome = app::collect_into(&common, archive.as_deref())?;
                 print_collect_result(&outcome);
             }
             WrCommand::Report(args) => {
@@ -69,7 +74,15 @@ fn main() -> anyhow::Result<()> {
                     let dir = common.out_dir.join(common.range.dir_name());
                     run_wr_worker(&backend, &dir, &common.range)?;
                 } else {
-                    let outcome = app::collect_into(&common)?;
+                    let sync_settings =
+                        cli::configured_sync(&config, &common.home, common.agents.clone())?;
+                    if !args.no_sync
+                        && let Some(settings) = &sync_settings
+                    {
+                        run_sync(settings)?;
+                    }
+                    let archive = sync_settings.as_ref().map(|s| s.path.as_path());
+                    let outcome = app::collect_into(&common, archive)?;
                     print_collect_result(&outcome);
                     schedule_wr_report(&common, &backend, &outcome.dir)?;
                 }
@@ -91,11 +104,8 @@ fn main() -> anyhow::Result<()> {
                 }
             };
             let settings = resolve_signoff_settings(&run_args, &config, &default_home);
-            let backend = cli::resolve_backend(
-                &run_args.llm,
-                &config,
-                Some(settings.mail_to.as_slice()),
-            )?;
+            let backend =
+                cli::resolve_backend(&run_args.llm, &config, Some(settings.mail_to.as_slice()))?;
             match action {
                 SignoffAction::Plan => {
                     let (ingest, gated) = signoff::run_plan(&settings, &backend)?;
@@ -149,6 +159,36 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn configured_archive(
+    config: &Config,
+    common: &cli::EffectiveCommon,
+) -> Result<Option<std::path::PathBuf>, cli::CliError> {
+    Ok(cli::configured_sync(config, &common.home, common.agents.clone())?.map(|s| s.path))
+}
+
+fn run_sync(settings: &cli::EffectiveSync) -> anyhow::Result<()> {
+    let outcome = buddy::sync::sync(settings)?;
+    println!(
+        "Synced {} files to {} (created={}, updated={}, skipped={}, failed={})",
+        outcome.scanned,
+        settings.path.display(),
+        outcome.created,
+        outcome.updated,
+        outcome.skipped,
+        outcome.failures.len()
+    );
+    for failure in &outcome.failures {
+        eprintln!("warning: sync failed: {failure}");
+    }
+    if !outcome.failures.is_empty() {
+        anyhow::bail!(
+            "sync completed with {} failed file(s)",
+            outcome.failures.len()
+        );
     }
     Ok(())
 }

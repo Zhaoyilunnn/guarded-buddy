@@ -25,9 +25,36 @@ pub fn build_sources(
         .collect()
 }
 
+/// Build sources for the live home plus every device home in the sync archive.
+pub fn build_aggregate_sources(
+    home: &Path,
+    archive_root: Option<&Path>,
+    agents: &Option<Vec<AgentKind>>,
+    include_prompt_history: bool,
+) -> Vec<Box<dyn HistorySource>> {
+    let mut homes = archive_root
+        .map(crate::sync::archive_homes)
+        .unwrap_or_default();
+    homes.push(home.to_path_buf());
+    homes.sort();
+    homes.dedup();
+    homes
+        .iter()
+        .flat_map(|root| build_sources(root, agents, include_prompt_history))
+        .collect()
+}
+
 /// Collect and write files under `out_dir/<range.dir_name()>/`.
-pub fn collect_into(common: &EffectiveCommon) -> std::io::Result<CollectOutcome> {
-    let sources = build_sources(&common.home, &common.agents, common.include_prompt_history);
+pub fn collect_into(
+    common: &EffectiveCommon,
+    archive_root: Option<&Path>,
+) -> std::io::Result<CollectOutcome> {
+    let sources = build_aggregate_sources(
+        &common.home,
+        archive_root,
+        &common.agents,
+        common.include_prompt_history,
+    );
     collect(&sources, &common.range, &common.out_dir)
 }
 
@@ -39,8 +66,9 @@ pub fn summarize_range_dir(
 ) -> Result<String, ReportError> {
     let summary = load_collected_dir(range_dir)?;
     let engine = match &backend.template {
-        Some(path) => TemplateEngine::from_file(path)
-            .map_err(|e| ReportError::ApiParse(e.to_string()))?,
+        Some(path) => {
+            TemplateEngine::from_file(path).map_err(|e| ReportError::ApiParse(e.to_string()))?
+        }
         None => TemplateEngine::default_template(),
     };
     let mode = match backend.kind {

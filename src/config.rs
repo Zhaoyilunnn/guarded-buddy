@@ -11,7 +11,15 @@ pub struct Config {
     pub out_dir: Option<String>,
     pub llm: LlmConfig,
     pub wr: WrConfig,
+    pub sync: SyncConfig,
     pub signoff: SignoffConfig,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SyncConfig {
+    pub path: Option<PathBuf>,
+    pub device: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
@@ -122,6 +130,9 @@ cli_name = "codex"
 [wr]
 days = 14
 mail_to = ["weekly@example.com"]
+[sync]
+path = "/tmp/buddy-archive"
+device = "work-laptop"
 [signoff]
 window_hours = 24
 mail_to = ["me@example.com"]
@@ -140,6 +151,11 @@ trust = "workspace-write"
         assert_eq!(config.llm.backend.as_deref(), Some("api"));
         assert_eq!(config.wr.days, Some(14));
         assert_eq!(
+            config.sync.path.as_deref(),
+            Some(std::path::Path::new("/tmp/buddy-archive"))
+        );
+        assert_eq!(config.sync.device.as_deref(), Some("work-laptop"));
+        assert_eq!(
             config.wr.mail_to.as_deref(),
             Some(["weekly@example.com".to_string()].as_slice())
         );
@@ -150,10 +166,7 @@ trust = "workspace-write"
         let ws = config.signoff.workspaces.as_ref().unwrap();
         assert_eq!(ws.len(), 1);
         assert_eq!(ws[0].path, "/tmp/proj");
-        assert_eq!(
-            ws[0].trust,
-            crate::signoff::WorkspaceTrust::WorkspaceWrite
-        );
+        assert_eq!(ws[0].trust, crate::signoff::WorkspaceTrust::WorkspaceWrite);
         assert_eq!(config.signoff.act_timeout_secs, Some(7200));
         assert_eq!(config.signoff.dry_run, Some(true));
     }

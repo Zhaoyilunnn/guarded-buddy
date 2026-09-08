@@ -140,6 +140,109 @@ fn collect_end_to_end_with_day_boundary() {
 }
 
 #[test]
+fn sync_then_collect_reads_archived_device() {
+    let source_home = fake_home();
+    let archive = tempfile::tempdir().unwrap();
+    let (_cfg, mut sync_cmd) = base_cmd();
+    sync_cmd
+        .args([
+            "sync",
+            "--home",
+            source_home.path().to_str().unwrap(),
+            "--path",
+            archive.path().to_str().unwrap(),
+            "--device",
+            "work-laptop",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("created="));
+
+    let config_home = tempfile::tempdir().unwrap();
+    write(
+        &config_home.path().join(".config/buddy/config.toml"),
+        &format!(
+            "[sync]\npath = {:?}\ndevice = \"home-pc\"\n",
+            archive.path().to_str().unwrap()
+        ),
+    );
+    let empty_home = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let mut collect = Command::cargo_bin("buddy").unwrap();
+    collect
+        .env("TZ", "Asia/Shanghai")
+        .env("HOME", config_home.path())
+        .args([
+            "wr",
+            "collect",
+            "--from",
+            "2026-07-12",
+            "--to",
+            "2026-07-18",
+            "--home",
+            empty_home.path().to_str().unwrap(),
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let day =
+        std::fs::read_to_string(out.path().join("2026-07-12_2026-07-18/2026-07-16.md")).unwrap();
+    assert!(day.contains("跨日边界的提问"));
+}
+
+#[test]
+fn wr_run_auto_syncs_when_configured() {
+    let config_home = tempfile::tempdir().unwrap();
+    let source_home = fake_home();
+    let archive = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let (_scripts, backend) = fake_backend_script();
+    write(
+        &config_home.path().join(".config/buddy/config.toml"),
+        &format!(
+            "[sync]\npath = {:?}\ndevice = \"work-laptop\"\n",
+            archive.path().to_str().unwrap()
+        ),
+    );
+
+    let mut cmd = Command::cargo_bin("buddy").unwrap();
+    cmd.env("TZ", "Asia/Shanghai")
+        .env("HOME", config_home.path())
+        .args([
+            "wr",
+            "run",
+            "--from",
+            "2026-07-12",
+            "--to",
+            "2026-07-18",
+            "--home",
+            source_home.path().to_str().unwrap(),
+            "--out",
+            out.path().to_str().unwrap(),
+            "--cmd",
+            backend.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Synced"));
+
+    assert!(
+        archive
+            .path()
+            .join(
+                "devices/work-laptop/home/.claude/projects/-home-zhaoyilun-notes-app/a1b2c3d4.jsonl"
+            )
+            .is_file()
+    );
+    let report = wait_for_file(
+        &out.path().join("2026-07-12_2026-07-18/report.md"),
+        Duration::from_secs(10),
+    );
+    assert!(report.contains("假周报"));
+}
+
+#[test]
 fn wr_run_schedules_background() {
     let (_cfg, mut cmd) = base_cmd();
     let home = fake_home();
@@ -161,7 +264,9 @@ fn wr_run_schedules_background() {
     ])
     .assert()
     .success()
-    .stdout(predicate::str::contains("Summarization started in background"));
+    .stdout(predicate::str::contains(
+        "Summarization started in background",
+    ));
 
     let dir = out.path().join("2026-07-12_2026-07-18");
     let report = wait_for_file(&dir.join("report.md"), Duration::from_secs(10));

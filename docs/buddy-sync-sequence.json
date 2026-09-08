@@ -1,0 +1,30 @@
+{
+  "title": "buddy sync 与 wr run 跨设备流程",
+  "participants": [
+    {"id": "user", "label": "用户", "actor": true},
+    {"id": "buddy", "label": "buddy CLI"},
+    {"id": "local", "label": "当前设备 HOME"},
+    {"id": "archive", "label": "设备归档目录"},
+    {"id": "cloud", "label": "坚果云"},
+    {"id": "collect", "label": "周报采集器"},
+    {"id": "llm", "label": "AI CLI / API"}
+  ],
+  "messages": [
+    {"from": "user", "to": "buddy", "label": "buddy sync"},
+    {"from": "buddy", "to": "local", "label": "扫描支持的原始历史文件"},
+    {"from": "buddy", "to": "archive", "label": "读取设备 manifest"},
+    {"from": "buddy", "to": "local", "label": "计算文件内容摘要"},
+    {"from": "buddy", "to": "archive", "label": "原子创建或更新变化文件"},
+    {"from": "buddy", "to": "archive", "label": "原子更新 manifest"},
+    {"from": "archive", "to": "cloud", "label": "坚果云跨设备同步", "async": true},
+    {"from": "buddy", "to": "user", "label": "输出 created / updated / skipped / failed", "return": true},
+    {"note": "配置了 [sync] 时自动执行上述同步；--no-sync 可跳过", "over": "buddy"},
+    {"from": "user", "to": "buddy", "label": "buddy wr run"},
+    {"from": "buddy", "to": "collect", "label": "采集当前 HOME + devices/*/home"},
+    {"from": "collect", "to": "collect", "label": "按会话和消息去重"},
+    {"from": "collect", "to": "buddy", "label": "生成最近一周每日 Markdown", "return": true},
+    {"from": "buddy", "to": "llm", "label": "提交周报 prompt"},
+    {"from": "llm", "to": "buddy", "label": "返回周报内容", "return": true},
+    {"from": "buddy", "to": "user", "label": "写入 report.md", "return": true}
+  ]
+}

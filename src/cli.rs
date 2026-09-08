@@ -22,6 +22,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Incrementally archive local AI conversation history
+    Sync(SyncArgs),
     /// Weekly report skill
     #[command(name = "wr", visible_alias = "weekly-report")]
     Wr(WrArgs),
@@ -114,6 +116,25 @@ pub struct RunArgs {
     pub common: CommonArgs,
     #[command(flatten)]
     pub backend: BackendArgs,
+    /// Do not sync before collecting, even when [sync] is configured
+    #[arg(long)]
+    pub no_sync: bool,
+}
+
+#[derive(Debug, Default, Args)]
+pub struct SyncArgs {
+    /// Archive root (overrides sync.path)
+    #[arg(long)]
+    pub path: Option<PathBuf>,
+    /// Stable device identifier (overrides sync.device)
+    #[arg(long)]
+    pub device: Option<String>,
+    /// Override $HOME
+    #[arg(long)]
+    pub home: Option<PathBuf>,
+    /// Limit the agents to archive
+    #[arg(long, value_delimiter = ',')]
+    pub agents: Option<Vec<String>>,
 }
 
 #[derive(Debug, Args)]
@@ -187,6 +208,77 @@ pub enum CliError {
     InvalidBackend(String),
     #[error("unknown agent: {0} (expected: codex, cursor, claude, gemini)")]
     InvalidAgent(String),
+    #[error("sync path is not configured (set [sync].path or pass --path)")]
+    MissingSyncPath,
+    #[error("sync device is not configured (set [sync].device or pass --device)")]
+    MissingSyncDevice,
+    #[error("invalid sync device {0:?} (use only letters, digits, '.', '_' or '-')")]
+    InvalidSyncDevice(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct EffectiveSync {
+    pub path: PathBuf,
+    pub device: String,
+    pub home: PathBuf,
+    pub agents: Option<Vec<AgentKind>>,
+}
+
+pub fn resolve_sync(
+    args: &SyncArgs,
+    config: &Config,
+    default_home: &std::path::Path,
+) -> Result<EffectiveSync, CliError> {
+    let path = args
+        .path
+        .clone()
+        .or_else(|| config.sync.path.clone())
+        .ok_or(CliError::MissingSyncPath)?;
+    let device = args
+        .device
+        .clone()
+        .or_else(|| config.sync.device.clone())
+        .ok_or(CliError::MissingSyncDevice)?;
+    if device.is_empty()
+        || !device
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(CliError::InvalidSyncDevice(device));
+    }
+    let agents = args
+        .agents
+        .as_ref()
+        .map(|list| {
+            list.iter()
+                .map(|s| AgentKind::from_slug(s).ok_or_else(|| CliError::InvalidAgent(s.clone())))
+                .collect()
+        })
+        .transpose()?;
+    Ok(EffectiveSync {
+        path,
+        device,
+        home: args
+            .home
+            .clone()
+            .unwrap_or_else(|| default_home.to_path_buf()),
+        agents,
+    })
+}
+
+pub fn configured_sync(
+    config: &Config,
+    home: &std::path::Path,
+    agents: Option<Vec<AgentKind>>,
+) -> Result<Option<EffectiveSync>, CliError> {
+    if config.sync.path.is_none() && config.sync.device.is_none() {
+        return Ok(None);
+    }
+    let args = SyncArgs::default();
+    let mut sync = resolve_sync(&args, config, home)?;
+    sync.home = home.to_path_buf();
+    sync.agents = agents;
+    Ok(Some(sync))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,10 +401,7 @@ pub fn resolve_backend(
             .clone()
             .or_else(|| config.llm.api_model.clone())
             .unwrap_or_else(|| "gpt-4o-mini".to_string()),
-        timeout_secs: args
-            .timeout_secs
-            .or(config.llm.timeout_secs)
-            .unwrap_or(600),
+        timeout_secs: args.timeout_secs.or(config.llm.timeout_secs).unwrap_or(600),
         mail_to,
         worker: args.worker,
     })
@@ -377,16 +466,8 @@ mod tests {
 
     #[test]
     fn parses_wr_run() {
-        let cli = Cli::try_parse_from([
-            "buddy",
-            "wr",
-            "run",
-            "--days",
-            "7",
-            "--backend",
-            "api",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["buddy", "wr", "run", "--days", "7", "--backend", "api"]).unwrap();
         let Command::Wr(wr) = cli.command else {
             panic!("expected wr")
         };
@@ -395,6 +476,35 @@ mod tests {
         };
         assert_eq!(args.common.range.days, Some(7));
         assert_eq!(args.backend.backend.as_deref(), Some("api"));
+    }
+
+    #[test]
+    fn parses_top_level_sync_and_wr_no_sync() {
+        let cli = Cli::try_parse_from([
+            "buddy",
+            "sync",
+            "--path",
+            "/archive",
+            "--device",
+            "work-pc",
+            "--agents",
+            "codex,claude",
+        ])
+        .unwrap();
+        let Command::Sync(args) = cli.command else {
+            panic!("expected sync")
+        };
+        assert_eq!(args.device.as_deref(), Some("work-pc"));
+        assert_eq!(args.agents.unwrap(), ["codex", "claude"]);
+
+        let cli = Cli::try_parse_from(["buddy", "wr", "run", "--no-sync"]).unwrap();
+        let Command::Wr(wr) = cli.command else {
+            panic!("expected wr")
+        };
+        let WrCommand::Run(args) = wr.command else {
+            panic!("expected run")
+        };
+        assert!(args.no_sync);
     }
 
     #[test]
