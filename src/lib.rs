@@ -1,4 +1,4 @@
-//! buddy: a guarded assistant — weekly reports (`wr`) and end-of-day `signoff`.
+//! buddy: a guarded assistant for weekly reports (`wr`) and end-of-day `signoff`.
 
 pub mod app;
 pub mod cli;

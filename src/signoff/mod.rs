@@ -1,4 +1,4 @@
-//! Signoff skill: ingest last N hours → plan todos → optional act → summary email.
+//! Signoff skill: ingest the last N hours, plan tasks, optionally act, then email a summary.
 
 mod plan;
 mod policy;
@@ -362,7 +362,7 @@ pub fn render_signoff_md(
     out
 }
 
-/// Full signoff run: ingest → plan → act (unless dry_run) → signoff.md.
+/// Run the full signoff flow: ingest, plan, act unless dry-run, then write `signoff.md`.
 pub fn run_full(
     settings: &SignoffSettings,
     backend: &EffectiveBackend,

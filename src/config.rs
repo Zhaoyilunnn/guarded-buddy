@@ -86,7 +86,7 @@ impl Config {
         home.join(".config").join("buddy").join("config.toml")
     }
 
-    /// Load config; missing file → all defaults.
+    /// Load config; a missing file produces the default configuration.
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
         match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text).map_err(|source| ConfigError::Parse {

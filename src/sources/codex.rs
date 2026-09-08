@@ -1,8 +1,8 @@
 //! Codex CLI data source: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
 //!
 //! Message extraction (newer CLIs dropped chat from `event_msg`):
-//! 1. Prefer `event_msg` → `user_message` / `agent_message` (legacy, deduped vs `response_item`).
-//! 2. If none, fall back to `response_item` → `message` with `role` user/assistant
+//! 1. Prefer `user_message` and `agent_message` records within `event_msg` (legacy, deduplicated against `response_item`).
+//! 2. If none exist, fall back to `message` records within `response_item` with a user or assistant role
 //!    (skip developer, injected context, and collab `agent_message` items).
 
 use std::fs::File;
@@ -210,7 +210,7 @@ fn message_from_event_msg(record: &serde_json::Value) -> Option<Message> {
 
 fn message_from_response_item(record: &serde_json::Value) -> Option<Message> {
     let payload = record.get("payload")?;
-    // Collab / subagent envelopes — not the primary user↔assistant thread.
+    // Collaboration and subagent envelopes are not part of the primary conversation.
     if payload.get("type").and_then(|t| t.as_str()) == Some("agent_message") {
         return None;
     }
@@ -275,7 +275,7 @@ fn is_injected_user_context(text: &str) -> bool {
         || t.starts_with("<INSTRUCTIONS>")
 }
 
-/// ISO8601/RFC3339 (UTC) → local timezone.
+/// Convert an ISO 8601/RFC 3339 UTC timestamp to the local time zone.
 fn parse_iso(s: &str) -> Option<DateTime<Local>> {
     DateTime::parse_from_rfc3339(s)
         .ok()

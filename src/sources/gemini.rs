@@ -5,7 +5,7 @@
 //!   assistant may include `toolCalls`); project name from `<slug>/.project_root` (first line).
 //! - agy/Antigravity: `~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/transcript.jsonl`
 //!   (`USER_INPUT` strips `<USER_REQUEST>`/`<ADDITIONAL_METADATA>` wrappers;
-//!   `PLANNER_RESPONSE` content → assistant text, tool_calls → tool use;
+//!   `PLANNER_RESPONSE` content becomes assistant text and tool calls become tool use;
 //!   VIEW_FILE and other tool results plus SYSTEM records are skipped).
 //! - `antigravity-cli/history.jsonl` (user prompts only, millisecond timestamps, grouped by workspace)
 //!   duplicates transcript content, excluded by default; included when `include_prompt_history` is enabled.
@@ -211,7 +211,7 @@ fn read_lines(path: &Path) -> Result<impl Iterator<Item = String>, SourceError> 
     Ok(BufReader::new(file).lines().map_while(Result::ok))
 }
 
-/// ISO8601/RFC3339 (UTC) → local timezone.
+/// Convert an ISO 8601/RFC 3339 UTC timestamp to the local time zone.
 fn parse_iso(s: &str) -> Option<DateTime<Local>> {
     DateTime::parse_from_rfc3339(s)
         .ok()
@@ -523,7 +523,7 @@ mod tests {
         assert_eq!(session.started_at.to_utc(), utc("2026-07-14T01:10:00Z"));
 
         let msgs = &session.messages;
-        // user×2 + assistant text×2 + tool×1 = 5
+        // Two user messages, two assistant texts, and one tool call total five messages.
         assert_eq!(msgs.len(), 5);
         assert_eq!(msgs[0].role, Role::User);
         assert_eq!(
@@ -584,7 +584,7 @@ mod tests {
         assert_eq!(session.agent, AgentKind::Gemini);
         assert_eq!(session.id, "c3d4e5f6-1111-4222-8333-abcdefabcdef");
         assert_eq!(session.started_at.to_utc(), utc("2026-07-14T02:00:00Z"));
-        // user×2 + assistant×2 + tool×1 = 5
+        // Two user messages, two assistant messages, and one tool call total five messages.
         assert_eq!(session.messages.len(), 5);
         assert_eq!(session.messages[0].role, Role::User);
         assert_eq!(session.messages[0].text().unwrap(), "帮我查一下这个项目的 license");
@@ -677,7 +677,7 @@ mod tests {
         let range = DateRange::new(d("2026-07-12"), d("2026-07-18")).unwrap();
         let mut warnings: Vec<SourceError> = Vec::new();
         let sessions = source.collect(&range, &mut warnings);
-        // agy ×1 + classic ×1, history excluded by default
+        // One Antigravity session and one classic session; history is excluded by default.
         assert_eq!(sessions.len(), 2);
         assert!(
             sessions
@@ -727,7 +727,7 @@ mod tests {
         let range = DateRange::new(d("2026-07-12"), d("2026-07-18")).unwrap();
         let mut warnings = Vec::new();
         let sessions = source.collect(&range, &mut warnings);
-        // agy ×1 + classic ×1 + history ×2 (grouped by workspace)
+        // One Antigravity session, one classic session, and two history groups by workspace.
         assert_eq!(sessions.len(), 4);
         assert_eq!(
             sessions

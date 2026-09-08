@@ -161,8 +161,7 @@ pub struct DirSummary {
 }
 
 /// Read all daily files under `out/<range>/` and count sessions/messages.
-/// Counts anchor on our rendered structure lines — `## <AgentName>` (exact match),
-/// `### 会话 \`<8-char id|unknown>\` · `, `- 时间: … · N 条消息` —
+/// Counts are anchored to exact agent headings, structured session headings, and session metadata lines
 /// so markdown headings inside message bodies do not skew counts.
 pub fn load_collected_dir(dir: &Path) -> Result<DirSummary, ReportError> {
     if !dir.is_dir() {
@@ -203,8 +202,8 @@ pub fn load_collected_dir(dir: &Path) -> Result<DirSummary, ReportError> {
     Ok(DirSummary { files, stats })
 }
 
-/// Match rendered session headings: `### 会话 \`<id>\` · `. Natural headings in message bodies
-/// (e.g. `### 一、架构对比`) lack the backtick id segment and will not match.
+/// Match only rendered session headings containing a backtick-delimited session ID.
+/// Natural headings in message bodies lack that ID segment and do not match.
 fn is_session_heading(line: &str) -> bool {
     let Some(rest) = line.strip_prefix("### 会话 `") else {
         return false;
@@ -215,12 +214,12 @@ fn is_session_heading(line: &str) -> bool {
     end > 0 && rest[end + 1..].starts_with(" · ")
 }
 
-/// Parse N from session meta line `- 时间: HH:MM – HH:MM · N 条消息`.
+/// Parse the message count from a rendered session metadata line.
 fn parse_session_meta_count(line: &str) -> Option<usize> {
     let rest = line.strip_prefix("- 时间: ")?;
     let count_part = rest.strip_suffix(" 条消息")?;
     let n = count_part.rsplit(" · ").next()?;
-    // time part must look like "HH:MM – HH:MM" (rough check to avoid false positives in body text)
+    // The time span must contain exactly two clock values to avoid false positives in body text.
     let time_part = count_part.strip_suffix(&format!(" · {n}"))?;
     let mut halves = time_part.split(" – ");
     let valid = matches!(
@@ -302,7 +301,7 @@ mod tests {
 
     #[test]
     fn inline_mode_truncates_proportionally_over_budget() {
-        // 3 files at 40KB each, 48KB total budget → truncated; full prompt must stay near budget
+        // Three 40 KB files exceed the 48 KB budget, so the complete prompt must be truncated near the limit.
         let big = "字".repeat(40 * 1024);
         let files: Vec<(String, String)> = (0..3)
             .map(|i| (format!("f{i}.md"), big.clone()))
@@ -369,7 +368,7 @@ mod tests {
 
     #[test]
     fn load_collected_dir_ignores_headings_inside_message_bodies() {
-        // markdown headings inside assistant message bodies (e.g. "## 综合分析", "### 一、对比")
+        // Markdown headings inside assistant message bodies must not be counted as structural headings.
         // must not affect stats
         let tmp = tempfile::tempdir().unwrap();
         let mut s = session(AgentKind::Cursor, "c1", 0);

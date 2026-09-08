@@ -2,7 +2,7 @@
 //!
 //! Each line is `{role, message.content[]}` (text / tool_use). No top-level timestamp:
 //! user text embeds `<timestamp>Wednesday, Jul 15, 2026, 2:18 PM (UTC+8)</timestamp>`,
-//! timestamp fallback chain = embedded timestamp → previous message timestamp → file mtime.
+//! timestamp fallback chain = embedded timestamp, previous message timestamp, then file mtime.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -121,8 +121,8 @@ static TS_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid regex")
 });
 
-/// Parse Cursor embedded timestamp → time with fixed offset. English month abbreviations, AM/PM,
-/// `UTC±h[:mm]` offset.
+/// Parse a Cursor embedded timestamp into a time with a fixed offset. English month abbreviations, AM/PM,
+/// and an offset in the form `UTC+h[:mm]` or `UTC-h[:mm]`.
 pub(crate) fn parse_cursor_timestamp(s: &str) -> Option<DateTime<FixedOffset>> {
     let caps = TS_RE.captures(s.trim())?;
     let month = month_from_abbrev(caps.get(1)?.as_str())?;
@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(session.started_at.to_utc(), utc("2026-07-15T06:18:00Z"));
 
         let msgs = &session.messages;
-        // user×2 + assistant text×3 + tool_use×2 = 7
+        // Two user messages, three assistant texts, and two tool calls total seven messages.
         assert_eq!(msgs.len(), 7);
 
         assert_eq!(msgs[0].role, Role::User);
@@ -370,7 +370,7 @@ mod tests {
         assert!(msgs[0].text().unwrap().contains("审查一下这个文档"));
         assert!(!msgs[0].text().unwrap().contains("user_query"));
 
-        // assistant has no embedded timestamp → inherit previous message timestamp
+        // The assistant has no embedded timestamp, so it inherits the previous message timestamp.
         assert_eq!(msgs[1].role, Role::Assistant);
         assert_eq!(msgs[1].timestamp.to_utc(), utc("2026-07-15T06:18:00Z"));
 

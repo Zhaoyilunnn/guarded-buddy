@@ -1,4 +1,4 @@
-//! Collection orchestration: gather sessions from all sources → bucket by local day (midnight split) →
+//! Collection orchestration: gather sessions from all sources, bucket by local day at midnight, then
 //! write `<out>/<range>/<date>.md` and `index.md` (idempotent overwrite).
 
 use std::collections::{BTreeMap, HashSet};

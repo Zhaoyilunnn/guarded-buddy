@@ -1,105 +1,105 @@
-# `buddy sync` 行为说明
+# `buddy sync` behavior
 
-`buddy sync` 将当前设备中 buddy 已支持的 AI 对话原始记录增量复制到共享目录。共享目录可以放在坚果云中，由坚果云负责跨设备传输；buddy 本身不连接坚果云 API。
+`buddy sync` incrementally copies supported raw AI conversation histories from the current device into a user-selected local directory. To make the archive available across devices, place that directory inside any folder managed by an external synchronization product, such as a cloud-drive client. buddy only performs local filesystem operations and does not depend on or call any synchronization-provider API.
 
-## 配置与运行
+## Configuration and usage
 
-在 `~/.config/buddy/config.toml` 中为每台设备配置相同的归档路径和不同的设备名：
+Configure the same archive path and a different device name on every device in `~/.config/buddy/config.toml`:
 
 ```toml
 [sync]
-path = "/path/to/Nutstore/buddy-history"
+path = "/path/to/cloud-synced-folder/buddy-history"
 device = "work-laptop"
 ```
 
-手动同步：
+Run a manual sync:
 
 ```sh
 buddy sync
 buddy sync --agents codex,claude
 ```
 
-`--path`、`--device` 和 `--home` 可以覆盖配置；`--agents` 可限制本次同步的来源。
+`--path`, `--device`, and `--home` override configuration values. `--agents` limits the sources included in that run.
 
-## 同步内容
+## Synced content
 
-buddy 不复制整个 HOME，只复制当前解析器支持的记录：
+buddy does not copy the entire HOME directory. It copies only records supported by the current parsers:
 
-| 来源 | 同步内容 |
+| Source | Synced content |
 | --- | --- |
-| Codex | `.codex/sessions` 中的 JSONL |
-| Cursor | `.cursor/projects` 中 `agent-transcripts` 下的 JSONL |
-| Claude | `.claude/projects` 中的 JSONL |
-| Gemini | classic session JSON、`.project_root`、Antigravity transcript 和 `history.jsonl` |
+| Codex | JSONL files under `.codex/sessions` |
+| Cursor | JSONL files under `agent-transcripts` in `.cursor/projects` |
+| Claude | JSONL files under `.claude/projects` |
+| Gemini | Classic session JSON, `.project_root`, Antigravity transcripts, and `history.jsonl` |
 
-目标结构按设备隔离：
+The destination is namespaced by device:
 
 ```text
 <sync.path>/
-└── devices/
-    ├── work-laptop/
-    │   ├── .buddy-sync-manifest.json
-    │   └── home/.codex|.cursor|.claude|.gemini/...
-    └── home-pc/
-        ├── .buddy-sync-manifest.json
-        └── home/...
+`-- devices/
+    |-- work-laptop/
+    |   |-- .buddy-sync-manifest.json
+    |   `-- home/.codex|.cursor|.claude|.gemini/...
+    `-- home-pc/
+        |-- .buddy-sync-manifest.json
+        `-- home/...
 ```
 
-每次运行会扫描支持的文件并计算内容摘要：
+Every run scans supported files and computes a content digest:
 
-- 新文件复制到当前设备的归档目录并计为 `created`。
-- 内容发生变化的文件安全替换并计为 `updated`。
-- 摘要和大小没有变化的文件不重写，计为 `skipped`。
-- 本机已经删除的历史不会从归档删除。
-- 符号链接不会被跟随。
-- 归档目标位于任一历史源目录中时会拒绝运行，防止递归复制。
-- 单文件失败不会阻止其他文件同步，但命令最终返回失败并列出错误。
+- New files are copied into the current device archive and counted as `created`.
+- Files whose content changed are safely replaced and counted as `updated`.
+- Files with the same digest and size are not rewritten and are counted as `skipped`.
+- Deleting local history does not delete its archived copy.
+- Symbolic links are not followed.
+- A destination inside a source history directory is rejected to prevent recursive copies.
+- One file failure does not stop the remaining files, but the command ultimately fails and lists the errors.
 
-文件和 manifest 都先写入同目录临时文件，再替换正式文件；替换失败时会尝试恢复旧文件，避免留下半写内容。
+Both history files and the manifest are written to a temporary file in the destination directory before replacing the live file. If replacement fails, buddy attempts to restore the previous file so readers do not observe a partially written file.
 
-## 与周报的关系
+## Weekly-report integration
 
-配置完整的 `[sync]` 后：
+With a complete `[sync]` configuration:
 
-- `buddy wr run` 先执行当前设备同步，再读取所有 `devices/*/home` 和当前 HOME；同步失败时不生成可能缺数据的周报。
-- `buddy wr run --no-sync` 跳过写入归档，但仍读取已有归档和当前 HOME。
-- `buddy wr collect` 不主动同步，但读取已有归档和当前 HOME。
-- `buddy wr report` 只总结已经生成的每日 Markdown，不重新读取原始历史。
-- 未配置 `[sync]` 时，所有 `wr` 命令保持原来的仅本机行为。
+- `buddy wr run` synchronizes the current device first, then reads every `devices/*/home` plus the current HOME. A sync failure stops report generation to avoid producing an incomplete report.
+- `buddy wr run --no-sync` does not write to the archive, but still reads the existing archive and current HOME.
+- `buddy wr collect` does not perform a sync, but reads the existing archive and current HOME.
+- `buddy wr report` summarizes previously generated daily Markdown and does not read raw history again.
+- Without `[sync]`, all `wr` commands retain their original local-only behavior.
 
-归档副本与当前 HOME 可能包含同一会话，采集阶段会按 Agent、会话 ID、项目和消息内容去重。
+The archive and current HOME can contain copies of the same session. Collection deduplicates them by agent, session ID, project, and message content.
 
-## 时序图
+## Sequence diagram
 
 ```mermaid
 sequenceDiagram
-    actor User as 用户
+    actor User
     participant Buddy as buddy CLI
-    participant Local as 当前设备 HOME
-    participant Archive as 设备归档目录
-    participant Cloud as 坚果云
-    participant Collect as 周报采集器
+    participant Local as Current device HOME
+    participant Archive as Device archive
+    participant Provider as External sync provider
+    participant Collect as Weekly report collector
     participant LLM as AI CLI / API
 
     User->>Buddy: buddy sync
-    Buddy->>Local: 扫描支持的原始历史文件
-    Buddy->>Archive: 读取设备 manifest
-    Buddy->>Local: 计算文件内容摘要
-    Buddy->>Archive: 原子创建或更新变化文件
-    Buddy->>Archive: 原子更新 manifest
-    Archive-->>Cloud: 坚果云跨设备同步
-    Buddy-->>User: 输出 created / updated / skipped / failed
+    Buddy->>Local: Scan supported raw history files
+    Buddy->>Archive: Read the device manifest
+    Buddy->>Local: Compute content digests
+    Buddy->>Archive: Atomically create or update changed files
+    Buddy->>Archive: Atomically update the manifest
+    Archive-->>Provider: External product replicates the folder
+    Buddy-->>User: Print created / updated / skipped / failed
 
-    Note over Buddy: 配置 [sync] 时，wr run 自动先执行同步
+    Note over Buddy: With [sync] configured, wr run performs sync first
     User->>Buddy: buddy wr run
-    Buddy->>Collect: 当前 HOME + devices/*/home
-    Collect->>Collect: 合并会话并按消息去重
-    Collect-->>Buddy: 最近一周每日 Markdown
-    Buddy->>LLM: 提交周报 prompt
-    LLM-->>Buddy: 返回周报内容
-    Buddy-->>User: 写入 report.md
+    Buddy->>Collect: Read current HOME + devices/*/home
+    Collect->>Collect: Deduplicate sessions and messages
+    Collect-->>Buddy: Create daily Markdown for the date range
+    Buddy->>LLM: Submit the weekly-report prompt
+    LLM-->>Buddy: Return the weekly report
+    Buddy-->>User: Write report.md
 ```
 
-可编辑的 draw.io 版本见 [`buddy-sync-sequence.drawio`](buddy-sync-sequence.drawio)，生成输入见 [`buddy-sync-sequence.json`](buddy-sync-sequence.json)。
+The editable draw.io version is [`buddy-sync-sequence.drawio`](buddy-sync-sequence.drawio). Its generator input is [`buddy-sync-sequence.json`](buddy-sync-sequence.json).
 
-> 原始对话可能包含源码、文件路径、prompt 和敏感信息。buddy 不加密归档，请只使用可信的同步目录。
+> Raw conversations may contain source code, filesystem paths, prompts, and secrets. buddy does not encrypt the archive, so use only a trusted synchronization directory.

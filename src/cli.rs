@@ -58,9 +58,9 @@ pub struct SignoffArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum SignoffCommand {
-    /// Ingest → plan → act → email (default when no subcommand)
+    /// Ingest, plan, act, and email (default when no subcommand)
     Run(SignoffRunArgs),
-    /// Ingest → plan only (no act, no email)
+    /// Ingest and plan only (no action or email)
     Plan(SignoffRunArgs),
     /// Resend an existing signoff.md
     Mail(MailArgs),

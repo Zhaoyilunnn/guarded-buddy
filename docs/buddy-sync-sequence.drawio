@@ -1,29 +1,29 @@
 <mxfile>
-  <diagram id="seqlayout" name="buddy sync 与 wr run 跨设备流程">
+  <diagram id="seqlayout" name="buddy sync and wr run across devices">
     <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
       <root>
         <mxCell id="0"/>
         <mxCell id="1" parent="0"/>
-        <mxCell id="user" value="用户" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;participant=umlActor;verticalAlign=bottom;spacingBottom=-14;labelBackgroundColor=#ffffff;" vertex="1" parent="1">
+        <mxCell id="user" value="User" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;participant=umlActor;verticalAlign=bottom;spacingBottom=-14;labelBackgroundColor=#ffffff;" vertex="1" parent="1">
           <mxGeometry x="40" y="40" width="100" height="960" as="geometry"/>
         </mxCell>
         <mxCell id="buddy" value="buddy CLI" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
-          <mxGeometry x="240" y="40" width="100" height="960" as="geometry"/>
+          <mxGeometry x="290" y="40" width="100" height="960" as="geometry"/>
         </mxCell>
-        <mxCell id="local" value="当前设备 HOME" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
-          <mxGeometry x="440" y="40" width="100" height="960" as="geometry"/>
+        <mxCell id="local" value="Current device HOME" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="540" y="40" width="100" height="960" as="geometry"/>
         </mxCell>
-        <mxCell id="archive" value="设备归档目录" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
-          <mxGeometry x="640" y="40" width="100" height="960" as="geometry"/>
+        <mxCell id="archive" value="Device archive" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="790" y="40" width="100" height="960" as="geometry"/>
         </mxCell>
-        <mxCell id="cloud" value="坚果云" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
-          <mxGeometry x="840" y="40" width="100" height="960" as="geometry"/>
-        </mxCell>
-        <mxCell id="collect" value="周报采集器" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+        <mxCell id="provider" value="External sync provider" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
           <mxGeometry x="1040" y="40" width="100" height="960" as="geometry"/>
         </mxCell>
+        <mxCell id="collect" value="Weekly report collector" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="1290" y="40" width="100" height="960" as="geometry"/>
+        </mxCell>
         <mxCell id="llm" value="AI CLI / API" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
-          <mxGeometry x="1240" y="40" width="100" height="960" as="geometry"/>
+          <mxGeometry x="1540" y="40" width="100" height="960" as="geometry"/>
         </mxCell>
         <mxCell id="act0" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="buddy">
           <mxGeometry x="45" y="90" width="10" height="350" as="geometry"/>
@@ -43,57 +43,57 @@
         <mxCell id="act5" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="archive">
           <mxGeometry x="45" y="190" width="10" height="730" as="geometry"/>
         </mxCell>
-        <mxCell id="act6" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="cloud">
+        <mxCell id="act6" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="provider">
           <mxGeometry x="45" y="390" width="10" height="530" as="geometry"/>
         </mxCell>
         <mxCell id="m0" value="buddy sync" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.0938;entryX=0;entryY=0.0;" edge="1" parent="1" source="user" target="act0">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m1" value="扫描支持的原始历史文件" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.1429;entryX=0;entryY=0.0;" edge="1" parent="1" source="act0" target="act4">
+        <mxCell id="m1" value="Scan supported raw history files" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.1429;entryX=0;entryY=0.0;" edge="1" parent="1" source="act0" target="act4">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m2" value="读取设备 manifest" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.2857;entryX=0;entryY=0.0;" edge="1" parent="1" source="act0" target="act5">
+        <mxCell id="m2" value="Read the device manifest" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.2857;entryX=0;entryY=0.0;" edge="1" parent="1" source="act0" target="act5">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m3" value="计算文件内容摘要" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.4286;entryX=0;entryY=0.1282;" edge="1" parent="1" source="act0" target="act4">
+        <mxCell id="m3" value="Compute content digests" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.4286;entryX=0;entryY=0.1282;" edge="1" parent="1" source="act0" target="act4">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m4" value="原子创建或更新变化文件" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.5714;entryX=0;entryY=0.137;" edge="1" parent="1" source="act0" target="act5">
+        <mxCell id="m4" value="Atomically create or update changed files" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.5714;entryX=0;entryY=0.137;" edge="1" parent="1" source="act0" target="act5">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m5" value="原子更新 manifest" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.7143;entryX=0;entryY=0.2055;" edge="1" parent="1" source="act0" target="act5">
+        <mxCell id="m5" value="Atomically update the manifest" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.7143;entryX=0;entryY=0.2055;" edge="1" parent="1" source="act0" target="act5">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m6" value="坚果云跨设备同步" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;exitX=1;exitY=0.274;entryX=0;entryY=0.0;" edge="1" parent="1" source="act5" target="act6">
+        <mxCell id="m6" value="External product replicates the folder" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;exitX=1;exitY=0.274;entryX=0;entryY=0.0;" edge="1" parent="1" source="act5" target="act6">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m7" value="输出 created / updated / skipped / failed" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=0.5;entryY=0.4583;" edge="1" parent="1" source="act0" target="user">
+        <mxCell id="m7" value="Print created / updated / skipped / failed" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=0.5;entryY=0.4583;" edge="1" parent="1" source="act0" target="user">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="note8" value="配置了 [sync] 时自动执行上述同步；--no-sync 可跳过" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
-          <mxGeometry x="310" y="510" width="140" height="40" as="geometry"/>
+        <mxCell id="note8" value="With [sync] configured, wr run performs sync first; --no-sync skips it" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="360" y="510" width="190" height="40" as="geometry"/>
         </mxCell>
         <mxCell id="m9" value="buddy wr run" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.5729;entryX=0;entryY=0.0;" edge="1" parent="1" source="user" target="act3">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m10" value="采集当前 HOME + devices/*/home" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.1562;entryX=0;entryY=0.0;" edge="1" parent="1" source="act3" target="act1">
+        <mxCell id="m10" value="Read current HOME + devices/*/home" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.1562;entryX=0;entryY=0.0;" edge="1" parent="1" source="act3" target="act1">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m11" value="按会话和消息去重" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.4167;entryX=1;entryY=0.6667;" edge="1" parent="1" source="act1" target="act1">
+        <mxCell id="m11" value="Deduplicate sessions and messages" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.4167;entryX=1;entryY=0.6667;" edge="1" parent="1" source="act1" target="act1">
           <mxGeometry relative="1" as="geometry">
-            <Array as="points"><mxPoint x="1150" y="690"/><mxPoint x="1150" y="720"/></Array>
+            <Array as="points"><mxPoint x="1400" y="690"/><mxPoint x="1400" y="720"/></Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="m12" value="生成最近一周每日 Markdown" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.5312;" edge="1" parent="1" source="act1" target="act3">
+        <mxCell id="m12" value="Create daily Markdown for the date range" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.5312;" edge="1" parent="1" source="act1" target="act3">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m13" value="提交周报 prompt" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.6875;entryX=0;entryY=0.0;" edge="1" parent="1" source="act3" target="act2">
+        <mxCell id="m13" value="Submit the weekly-report prompt" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.6875;entryX=0;entryY=0.0;" edge="1" parent="1" source="act3" target="act2">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m14" value="返回周报内容" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.8438;" edge="1" parent="1" source="act2" target="act3">
+        <mxCell id="m14" value="Return the weekly report" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.8438;" edge="1" parent="1" source="act2" target="act3">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m15" value="写入 report.md" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=0.5;entryY=0.9062;" edge="1" parent="1" source="act3" target="user">
+        <mxCell id="m15" value="Write report.md" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=0.5;entryY=0.9062;" edge="1" parent="1" source="act3" target="user">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
       </root>

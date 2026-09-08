@@ -271,7 +271,7 @@ fn wr_run_schedules_background() {
     let dir = out.path().join("2026-07-12_2026-07-18");
     let report = wait_for_file(&dir.join("report.md"), Duration::from_secs(10));
     assert!(report.contains("假周报"));
-    // No mail_to in isolated config → worker must not create a mail attempt that needs mutt.
+    // No mail_to exists in the isolated config, so the worker must not attempt to invoke mutt.
     // (If real config leaked, mutt could fire; isolation is the guard.)
 }
 

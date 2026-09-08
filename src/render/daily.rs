@@ -1,4 +1,4 @@
-//! Daily unified Markdown rendering: fixed agent order (Codex→Cursor→Claude Code→Gemini),
+//! Daily unified Markdown rendering with a fixed agent order: Codex, Cursor, Claude Code, then Gemini.
 //! sessions sorted by first message of the day, message bodies truncated at 2000 chars with original length noted.
 
 use std::collections::BTreeMap;

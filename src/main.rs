@@ -1,4 +1,4 @@
-//! Thin entry: CLI → config → skill dispatch.
+//! Thin entry point from CLI parsing through configuration to skill dispatch.
 
 use std::io::Write;
 use std::path::Path;

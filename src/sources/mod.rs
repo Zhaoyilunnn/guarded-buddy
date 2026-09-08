@@ -46,7 +46,7 @@ pub trait HistorySource: Send + Sync {
     fn collect(&self, range: &DateRange, warnings: &mut Vec<SourceError>) -> Vec<Session>;
 }
 
-/// Default registry: Codex → Cursor → Claude → Gemini.
+/// Default registry order: Codex, Cursor, Claude, then Gemini.
 pub fn default_sources(home: &Path) -> Vec<Box<dyn HistorySource>> {
     default_sources_opts(home, false)
 }

@@ -24,7 +24,7 @@ pub fn gate_plan(plan: SignoffPlan, min_confidence: f64, max_auto: usize) -> Gat
             continue;
         }
 
-        // Auto candidates — may demote.
+        // Automatic candidates may be demoted.
         if todo.confidence < min_confidence {
             todo.autonomy = Autonomy::NeedsHuman;
             todo.needs_human_reason = Some(format!(

@@ -1,6 +1,6 @@
 # guarded-buddy
 
-A **guarded buddy** — not a free-roaming agent, but a CLI that runs specific skills under clear constraints, borrowing local AI CLIs / OpenAI-compatible APIs when needed.
+A **guarded buddy** - not a free-roaming agent, but a CLI that runs specific skills under clear constraints, borrowing local AI CLIs / OpenAI-compatible APIs when needed.
 
 Binary: **`buddy`**
 
@@ -8,19 +8,19 @@ Binary: **`buddy`**
 
 ```text
 buddy
-├── sync                     # archive local chat history to a shared directory
-├── wr | weekly-report     # weekly AI chat report
-│   ├── collect | report | run
-│   ├── mail <report.md>
-│   └── sources
-├── signoff                # end-of-day silent progress
-│   ├── run                # default: ingest → plan → act → email
-│   ├── plan               # plan only (no act / no email)
-│   └── mail <signoff.md>
-└── completions <bash|zsh|fish>
+|-- sync                   # archive local chat history to a shared directory
+|-- wr | weekly-report     # weekly AI chat report
+|   |-- collect | report | run
+|   |-- mail <report.md>
+|   `-- sources
+|-- signoff                # end-of-day silent progress
+|   |-- run                # default: ingest -> plan -> act -> email
+|   |-- plan               # plan only (no act / no email)
+|   `-- mail <signoff.md>
+`-- completions <bash|zsh|fish>
 ```
 
-### `wr` — weekly report
+### `wr` - weekly report
 
 Collects conversation history from Codex / Cursor / Claude Code / Gemini under `$HOME`, writes per-day Markdown, then summarizes in the background to `report.md` (optional mutt email).
 
@@ -36,10 +36,12 @@ When `[sync]` is configured, `buddy wr run` first archives this device and then
 collects from every archived device plus the live local home. Use `--no-sync`
 only when the shared directory is temporarily unavailable.
 
-### `sync` — cross-device conversation archive
+### `sync` - cross-device conversation archive
 
 `buddy sync` incrementally copies only supported raw conversation-history files.
 Each device writes to its own namespace; source deletions are never propagated.
+The destination is any local directory selected by the user. Cross-device
+replication is delegated to an external sync product; buddy has no provider-specific integration.
 
 ```sh
 buddy sync
@@ -51,7 +53,7 @@ secrets. Choose a trusted sync directory; buddy does not encrypt the archive.
 
 Detailed behavior and sequence diagram: [docs/buddy-sync.md](docs/buddy-sync.md).
 
-### `signoff` — end of day
+### `signoff` - end of day
 
 1. **Ingest** last N hours (default 24) of AI coding chats  
 2. **Plan** structured todos; model + local gate classify `auto` vs `needs_human`  
@@ -60,7 +62,7 @@ Detailed behavior and sequence diagram: [docs/buddy-sync.md](docs/buddy-sync.md)
 
 ```sh
 buddy signoff              # background worker
-buddy signoff plan         # plan only → plan.json
+buddy signoff plan         # plan only -> plan.json
 buddy signoff --dry-run    # plan + signoff.md, no agent actions
 buddy signoff mail out/signoff/2026-08-04/signoff.md
 ```
@@ -90,7 +92,7 @@ days = 7
 mail_to = ["weekly@example.com"]
 
 [sync]
-path = "/path/to/Nutstore/buddy-history"
+path = "/path/to/cloud-synced-folder/buddy-history"
 device = "work-laptop"          # unique and stable on every device
 
 [signoff]

@@ -219,7 +219,7 @@ fn push_text(messages: &mut Vec<Message>, role: Role, ts: DateTime<Local>, text:
     });
 }
 
-/// ISO8601/RFC3339 (UTC) → local timezone.
+/// Convert an ISO 8601/RFC 3339 UTC timestamp to the local time zone.
 fn parse_iso(s: &str) -> Option<DateTime<Local>> {
     DateTime::parse_from_rfc3339(s)
         .ok()
@@ -322,7 +322,7 @@ mod tests {
             .messages
             .iter()
             .any(|m| m.text() == Some("为笔记应用添加全文搜索")));
-        // message total: user×2 + assistant text×2 + tool_use×1 = 5
+        // Two user messages, two assistant texts, and one tool call total five messages.
         assert_eq!(session.messages.len(), 5);
     }
 
