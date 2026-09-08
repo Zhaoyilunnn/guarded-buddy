@@ -6,7 +6,11 @@ use std::process::{Command, Stdio};
 
 /// Whether `mutt` is on PATH and runnable.
 pub fn mutt_available() -> bool {
-    Command::new("mutt")
+    mutt_available_with(Path::new("mutt"))
+}
+
+fn mutt_available_with(program: &Path) -> bool {
+    Command::new(program)
         .arg("-v")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -44,10 +48,19 @@ pub fn send_report_with_mutt(
     subject: &str,
     report_path: &Path,
 ) -> Result<(), MailError> {
+    send_report_with_program(Path::new("mutt"), to, subject, report_path)
+}
+
+fn send_report_with_program(
+    program: &Path,
+    to: &[String],
+    subject: &str,
+    report_path: &Path,
+) -> Result<(), MailError> {
     if to.is_empty() {
         return Err(MailError::NoRecipients);
     }
-    if !mutt_available() {
+    if !mutt_available_with(program) {
         return Err(MailError::MuttMissing);
     }
     let body = std::fs::read_to_string(report_path).map_err(|source| MailError::Read {
@@ -55,7 +68,7 @@ pub fn send_report_with_mutt(
         source,
     })?;
 
-    let mut child = Command::new("mutt")
+    let mut child = Command::new(program)
         .arg("-s")
         .arg(subject)
         .arg("--")
@@ -67,9 +80,7 @@ pub fn send_report_with_mutt(
         .map_err(MailError::Spawn)?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(body.as_bytes())
-            .map_err(MailError::Spawn)?;
+        stdin.write_all(body.as_bytes()).map_err(MailError::Spawn)?;
     }
 
     let output = child.wait_with_output().map_err(MailError::Spawn)?;
@@ -85,12 +96,11 @@ pub fn send_report_with_mutt(
 
 #[cfg(test)]
 mod tests {
-    use super::{MailError, mutt_available, mutt_missing_hint, send_report_with_mutt};
+    use super::{
+        MailError, mutt_available_with, mutt_missing_hint, send_report_with_mutt,
+        send_report_with_program,
+    };
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
-
-    // Serialize PATH mutations across mail unit tests.
-    static PATH_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn send_with_empty_recipients_errors() {
@@ -105,30 +115,22 @@ mod tests {
 
     #[test]
     fn send_with_missing_mutt_errors() {
-        let _guard = PATH_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        // Empty PATH → mutt not found.
-        let old = std::env::var_os("PATH");
-        // SAFETY: single-threaded under PATH_LOCK for this test process section.
-        unsafe { std::env::set_var("PATH", tmp.path()) };
-        assert!(!mutt_available());
+        let missing_mutt = tmp.path().join("mutt");
+        assert!(!mutt_available_with(&missing_mutt));
         let to = vec!["nobody@example.com".to_string()];
-        let err = send_report_with_mutt(&to, "subj", Path::new("/tmp/x")).unwrap_err();
+        let err =
+            send_report_with_program(&missing_mutt, &to, "subj", Path::new("/tmp/x")).unwrap_err();
         assert!(matches!(err, MailError::MuttMissing));
-        match old {
-            Some(v) => unsafe { std::env::set_var("PATH", v) },
-            None => unsafe { std::env::remove_var("PATH") },
-        }
     }
 
     #[test]
     fn send_with_fake_mutt_succeeds() {
-        let _guard = PATH_LOCK.lock().unwrap();
         let bin = tempfile::tempdir().unwrap();
         let mutt = bin.path().join("mutt");
         std::fs::write(
             &mutt,
-            "#!/bin/sh\n# fake mutt: accept -v and -s ...\nif [ \"$1\" = \"-v\" ]; then exit 0; fi\ncat > /dev/null\nexit 0\n",
+            "#!/bin/sh\n# fake mutt: accept -v and consume the mail body.\nif [ \"$1\" = \"-v\" ]; then exit 0; fi\nwhile IFS= read -r _; do :; done\nexit 0\n",
         )
         .unwrap();
         #[cfg(unix)]
@@ -141,24 +143,18 @@ mod tests {
         let report = report_dir.path().join("report.md");
         std::fs::write(&report, "# hello report\n").unwrap();
 
-        let old = std::env::var_os("PATH");
-        unsafe { std::env::set_var("PATH", bin.path()) };
-        assert!(mutt_available());
-        send_report_with_mutt(
+        assert!(mutt_available_with(&mutt));
+        send_report_with_program(
+            &mutt,
             &["a@example.com".to_string()],
             "AI weekly report",
             &report,
         )
         .unwrap();
-        match old {
-            Some(v) => unsafe { std::env::set_var("PATH", v) },
-            None => unsafe { std::env::remove_var("PATH") },
-        }
     }
 
     #[test]
     fn send_with_missing_file_when_mutt_present() {
-        let _guard = PATH_LOCK.lock().unwrap();
         let bin = tempfile::tempdir().unwrap();
         let mutt = bin.path().join("mutt");
         std::fs::write(&mutt, "#!/bin/sh\nexit 0\n").unwrap();
@@ -167,15 +163,9 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&mutt, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let old = std::env::var_os("PATH");
-        unsafe { std::env::set_var("PATH", bin.path()) };
         let to = vec!["nobody@example.com".to_string()];
         let missing = PathBuf::from("/nonexistent/aiw-report-missing.md");
-        let err = send_report_with_mutt(&to, "subj", &missing).unwrap_err();
+        let err = send_report_with_program(&mutt, &to, "subj", &missing).unwrap_err();
         assert!(matches!(err, MailError::Read { .. }));
-        match old {
-            Some(v) => unsafe { std::env::set_var("PATH", v) },
-            None => unsafe { std::env::remove_var("PATH") },
-        }
     }
 }
