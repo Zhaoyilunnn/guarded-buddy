@@ -1,8 +1,11 @@
 //! External CLI backend: preset table (codex/claude/agy/gemini) + custom commands,
 //! stdin preferred (avoids argv length/quoting issues), wait-timeout prevents hangs.
 
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use wait_timeout::ChildExt;
@@ -55,19 +58,110 @@ pub fn parse_custom_cmd(template: &str) -> Result<CliSpec, ReportError> {
 pub struct CliSummarizer {
     spec: CliSpec,
     timeout: Duration,
+    log: Option<Arc<Mutex<File>>>,
 }
 
 impl CliSummarizer {
     pub fn new(spec: CliSpec, timeout: Duration) -> Self {
-        Self { spec, timeout }
+        Self {
+            spec,
+            timeout,
+            log: None,
+        }
     }
+
+    /// Enable a separate, exclusively created log for this invocation.
+    pub fn with_log(mut self, dir: &Path) -> Result<Self, ReportError> {
+        let path = dir.canonicalize()?.join(format!(
+            "agent-{}-{}.log",
+            chrono::Utc::now().format("%Y%m%dT%H%M%S%.9fZ"),
+            std::process::id()
+        ));
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        eprintln!("worker: agent log: {}", path.display());
+        self.log = Some(Arc::new(Mutex::new(file)));
+        Ok(self)
+    }
+}
+
+fn log_output(log: &Option<Arc<Mutex<File>>>, stream: &str, text: &str) {
+    if let Some(log) = log {
+        let mut file = log.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(error) = writeln!(
+            file,
+            "[{}] [{stream}] {text}",
+            chrono::Utc::now().to_rfc3339()
+        )
+        .and_then(|_| file.flush())
+        {
+            eprintln!("worker: agent log write failed: {error}");
+        }
+    }
+}
+
+/// Drain both pipes concurrently, preserving UTF-8 characters across read boundaries.
+fn read_output(mut pipe: impl Read, log: Option<Arc<Mutex<File>>>, stream: &str) -> String {
+    let mut output = Vec::new();
+    let mut pending = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        match pipe.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => {
+                output.extend_from_slice(&buffer[..n]);
+                pending.extend_from_slice(&buffer[..n]);
+                loop {
+                    match std::str::from_utf8(&pending) {
+                        Ok(text) => {
+                            log_output(&log, stream, text);
+                            pending.clear();
+                            break;
+                        }
+                        Err(error) => {
+                            let valid = error.valid_up_to();
+                            if valid > 0 {
+                                log_output(
+                                    &log,
+                                    stream,
+                                    std::str::from_utf8(&pending[..valid]).unwrap(),
+                                );
+                                pending.drain(..valid);
+                            }
+                            if let Some(n) = error.error_len() {
+                                log_output(&log, stream, "\u{fffd}");
+                                pending.drain(..n);
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                log_output(&log, "event", &format!("{stream} read failed: {error}"));
+                break;
+            }
+        }
+    }
+    if !pending.is_empty() {
+        log_output(&log, stream, &String::from_utf8_lossy(&pending));
+    }
+    String::from_utf8_lossy(&output).into_owned()
 }
 
 /// Build the detail string for a failed CLI run.
 /// Claude Code (and some other CLIs) print API/auth errors to stdout while leaving stderr empty.
 fn cli_failure_detail(stdout: &str, stderr: &str) -> String {
     match (stderr.trim().is_empty(), stdout.trim().is_empty()) {
-        (false, false) => format!("{}\n--- stdout ---\n{}", stderr.trim_end(), stdout.trim_end()),
+        (false, false) => format!(
+            "{}\n--- stdout ---\n{}",
+            stderr.trim_end(),
+            stdout.trim_end()
+        ),
         (false, true) => stderr.to_string(),
         (true, false) => stdout.to_string(),
         (true, true) => "(no stdout/stderr captured)".to_string(),
@@ -76,6 +170,16 @@ fn cli_failure_detail(stdout: &str, stderr: &str) -> String {
 
 impl Summarizer for CliSummarizer {
     fn summarize(&self, prompt: &Prompt) -> Result<String, ReportError> {
+        let started = std::time::Instant::now();
+        log_output(
+            &self.log,
+            "event",
+            &format!(
+                "starting {}; timeout={}s",
+                self.spec.program,
+                self.timeout.as_secs()
+            ),
+        );
         let mut cmd = Command::new(&self.spec.program);
         cmd.args(&self.spec.args)
             .current_dir(&prompt.dir)
@@ -89,6 +193,16 @@ impl Summarizer for CliSummarizer {
             cmd: self.spec.program.clone(),
             source,
         })?;
+        let out_log = self.log.clone();
+        let err_log = self.log.clone();
+        let mut out_thread = child
+            .stdout
+            .take()
+            .map(|pipe| std::thread::spawn(move || read_output(pipe, out_log, "stdout")));
+        let mut err_thread = child
+            .stderr
+            .take()
+            .map(|pipe| std::thread::spawn(move || read_output(pipe, err_log, "stderr")));
         if self.spec.stdin_prompt
             && let Some(mut stdin) = child.stdin.take()
         {
@@ -97,24 +211,14 @@ impl Summarizer for CliSummarizer {
             let _ = stdin.flush();
             drop(stdin); // close pipe so the child sees EOF
         }
-        // spawn reader threads for stdout/stderr to avoid pipe buffer deadlock
-        let mut out_thread = child.stdout.take().map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut buf = String::new();
-                let _ = pipe.read_to_string(&mut buf);
-                buf
-            })
-        });
-        let mut err_thread = child.stderr.take().map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut buf = String::new();
-                let _ = pipe.read_to_string(&mut buf);
-                buf
-            })
-        });
 
         match child.wait_timeout(self.timeout) {
             Ok(Some(status)) => {
+                log_output(
+                    &self.log,
+                    "event",
+                    &format!("exit={status}; elapsed={:?}", started.elapsed()),
+                );
                 let stdout_s = out_thread
                     .take()
                     .map(|h| h.join().unwrap_or_default())
@@ -136,6 +240,14 @@ impl Summarizer for CliSummarizer {
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                log_output(
+                    &self.log,
+                    "event",
+                    &format!(
+                        "timed out; termination requested; elapsed={:?}",
+                        started.elapsed()
+                    ),
+                );
                 Err(ReportError::CliTimeout {
                     cmd: self.spec.program.clone(),
                     secs: self.timeout.as_secs(),
@@ -174,6 +286,58 @@ mod tests {
             text: text.to_string(),
             dir: std::env::current_dir().unwrap(),
         }
+    }
+
+    #[test]
+    fn live_log_survives_timeout_without_newlines() {
+        let (_script, path) = fake_script("printf progress; printf diagnostic >&2; sleep 3");
+        let logs = tempfile::tempdir().unwrap();
+        let summarizer = CliSummarizer::new(
+            parse_custom_cmd(path.to_str().unwrap()).unwrap(),
+            Duration::from_millis(800),
+        )
+        .with_log(logs.path())
+        .unwrap();
+        let handle = std::thread::spawn(move || summarizer.summarize(&prompt("")));
+        let log = std::fs::read_dir(logs.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let start = std::time::Instant::now();
+        loop {
+            let text = std::fs::read_to_string(&log).unwrap();
+            if text.contains("progress") && text.contains("diagnostic") {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_millis(700),
+                "output must be logged before timeout"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!handle.is_finished());
+        assert!(matches!(
+            handle.join().unwrap(),
+            Err(ReportError::CliTimeout { .. })
+        ));
+        assert!(std::fs::read_to_string(log).unwrap().contains("timed out"));
+    }
+
+    #[test]
+    fn logs_do_not_change_final_stdout() {
+        let (_script, path) = fake_script("printf 'report'; printf 'diagnostic' >&2");
+        let logs = tempfile::tempdir().unwrap();
+        let result = CliSummarizer::new(
+            parse_custom_cmd(path.to_str().unwrap()).unwrap(),
+            Duration::from_secs(5),
+        )
+        .with_log(logs.path())
+        .unwrap()
+        .summarize(&prompt(""))
+        .unwrap();
+        assert_eq!(result, "report");
     }
 
     // ---------- preset table ----------
@@ -290,10 +454,7 @@ mod tests {
 
     #[test]
     fn cli_failure_detail_combines_both_streams() {
-        assert_eq!(
-            cli_failure_detail("out-msg", ""),
-            "out-msg"
-        );
+        assert_eq!(cli_failure_detail("out-msg", ""), "out-msg");
         assert_eq!(cli_failure_detail("", "err-msg"), "err-msg");
         let both = cli_failure_detail("out-msg", "err-msg");
         assert!(both.contains("err-msg"));
@@ -316,7 +477,10 @@ mod tests {
         let summarizer = CliSummarizer::new(spec, Duration::from_millis(200));
         let start = std::time::Instant::now();
         let err = summarizer.summarize(&prompt("x")).unwrap_err();
-        assert!(start.elapsed() < Duration::from_secs(5), "should be killed promptly");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "should be killed promptly"
+        );
         assert!(matches!(err, ReportError::CliTimeout { .. }));
     }
 }

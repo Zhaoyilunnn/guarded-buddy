@@ -22,6 +22,8 @@ buddy
 
 ### `wr` - weekly report
 
+Execution sequence and current limitations: [docs/wr-run.md](docs/wr-run.md).
+
 Collects conversation history from Codex / Cursor / Claude Code / Gemini under `$HOME`, writes per-day Markdown, then summarizes in the background to `report.md` (optional mutt email).
 
 ```sh
@@ -31,6 +33,16 @@ buddy wr report --days 7
 buddy wr mail out/2026-07-12_2026-07-18/report.md
 buddy wr sources
 ```
+
+CLI-backed `wr run` and `wr report` automatically save agent stdout and stderr
+as they arrive to `out/<date-range>/agent-<timestamp>-<worker-pid>.log`.
+The absolute path is printed in `report.log`; use `tail -f` on that file to
+inspect progress, tool output, or errors emitted by the external CLI.
+Each invocation has a separate log, retained on failure and timeout.
+Stream labels and timestamps are added per received chunk; the final report
+still uses only stdout. These logs contain raw CLI output and may include
+conversation content or credentials. They do not expose activity the CLI does
+not emit. API backends and signoff do not enable this agent log.
 
 When `[sync]` is configured, `buddy wr run` first archives this device and then
 collects from every archived device plus the live local home. Use `--no-sync`

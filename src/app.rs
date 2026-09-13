@@ -94,7 +94,9 @@ pub fn summarize_range_dir(
                 None => preset(&backend.cli_name)
                     .ok_or_else(|| ReportError::UnknownCliPreset(backend.cli_name.clone()))?,
             };
-            CliSummarizer::new(spec, Duration::from_secs(backend.timeout_secs)).summarize(&prompt)
+            CliSummarizer::new(spec, Duration::from_secs(backend.timeout_secs))
+                .with_log(range_dir)?
+                .summarize(&prompt)
         }
         BackendKind::Api => ApiSummarizer::new(
             ReqwestClient::with_timeout(Duration::from_secs(backend.timeout_secs)),
