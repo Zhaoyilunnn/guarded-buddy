@@ -32,7 +32,7 @@ sequenceDiagram
     CLI->>Files: Open report.log in append mode
     CLI->>Worker: Spawn with resolved options and redirected output
     CLI->>Files: Write report.pid
-    CLI-->>User: Print worker PID, report path and report.log path; exit
+    CLI-->>User: Print worker PID, report path and report.log path, then exit
     Note over Worker,Files: Worker continues independently of the foreground process
     Worker->>Files: Append summarization start to report.log
     Worker->>Files: Read Markdown input and compute statistics
@@ -47,16 +47,16 @@ sequenceDiagram
             Worker->>Files: Flush timestamped chunk to agent log
         end
         alt Successful exit
-            Agent-->>Worker: Exit code zero; stdout is the report
+            Agent-->>Worker: Exit code zero, stdout is the report
         else Nonzero exit or timeout
             Worker->>Files: Record exit or timeout in agent log
-            Worker->>Files: Report error in report.log; stop worker
-            Note over Worker,Agent: Timeout requests termination; captured logs remain
+            Worker->>Files: Report error in report.log and stop worker
+            Note over Worker,Agent: Timeout requests termination, captured logs remain
         end
     else API backend
         Worker->>Agent: Send inline prompt with character budget
         Agent-->>Worker: Report content or API error
-        Note over Worker,Files: No CLI agent log; API errors stop the worker
+        Note over Worker,Files: No CLI agent log, API errors stop the worker
     end
     opt Summarization succeeded
         Worker->>Files: Write report.md and log completion
@@ -65,9 +65,9 @@ sequenceDiagram
             alt mutt available
                 Worker->>Mail: Send report body
                 Mail-->>Worker: Success or failure
-                Worker->>Files: Log email result; retain report.md on failure
+                Worker->>Files: Log email result and retain report.md on failure
             else mutt unavailable
-                Worker->>Files: Log installation hint; retain report.md
+                Worker->>Files: Log installation hint and retain report.md
             end
         end
     end
