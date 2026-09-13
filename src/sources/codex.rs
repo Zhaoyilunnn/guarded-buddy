@@ -9,7 +9,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Datelike, Local};
+use chrono::{DateTime, Local};
+use walkdir::WalkDir;
 
 use super::{HistorySource, SourceError, cap_ingest};
 use crate::domain::{AgentKind, DateRange, Message, MessageContent, Role, Session};
@@ -37,7 +38,7 @@ impl HistorySource for CodexSource {
 
     fn collect(&self, range: &DateRange, warnings: &mut Vec<SourceError>) -> Vec<Session> {
         let mut sessions = Vec::new();
-        for file in rollout_files_in_range(&self.root, range) {
+        for file in rollout_files_in_range(&self.root, range, warnings) {
             let fallback_id = file
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -66,26 +67,62 @@ impl HistorySource for CodexSource {
     }
 }
 
-/// Pre-filter by `YYYY/MM/DD` directory names; enumerate only date dirs intersecting the range (avoids full scan).
-fn rollout_files_in_range(root: &Path, range: &DateRange) -> Vec<PathBuf> {
+/// Scan all date directories, skipping only files modified before the first local day.
+/// Message timestamps are filtered later by the collector; mtime has no upper bound.
+fn rollout_files_in_range(
+    root: &Path,
+    range: &DateRange,
+    warnings: &mut Vec<SourceError>,
+) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    for day in range.days() {
-        let dir = root
-            .join(format!("{:04}", day.year()))
-            .join(format!("{:02}", day.month()))
-            .join(format!("{:02}", day.day()));
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "jsonl") {
-                files.push(path);
+    for entry in WalkDir::new(root).follow_links(false) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                if error.depth() == 0
+                    && error
+                        .io_error()
+                        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                {
+                    continue;
+                }
+                warnings.push(SourceError::Io {
+                    path: error.path().unwrap_or(root).to_path_buf(),
+                    source: std::io::Error::other(error),
+                });
+                continue;
             }
+        };
+        let path = entry.path();
+        if !entry.file_type().is_file() || !path.extension().is_some_and(|e| e == "jsonl") {
+            continue;
+        }
+        let modified = std::fs::metadata(path).and_then(|metadata| metadata.modified());
+        if modified_since_start(path, modified, range, warnings) {
+            files.push(path.to_path_buf());
         }
     }
     files.sort();
     files
+}
+
+fn modified_since_start(
+    path: &Path,
+    modified: std::io::Result<std::time::SystemTime>,
+    range: &DateRange,
+    warnings: &mut Vec<SourceError>,
+) -> bool {
+    match modified {
+        // Comparing local dates avoids assuming that every timezone has an unambiguous midnight.
+        Ok(time) => DateTime::<Local>::from(time).date_naive() >= range.start,
+        Err(source) => {
+            warnings.push(SourceError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+            true
+        }
+    }
 }
 
 fn read_lines(path: &Path) -> Result<impl Iterator<Item = String>, SourceError> {
@@ -259,11 +296,7 @@ fn join_message_content(content: &serde_json::Value) -> Option<String> {
         }
         out.push_str(text);
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 /// Drop automatic context blocks that newer Codex injects as `role=user` messages.
@@ -362,14 +395,26 @@ mod tests {
         assert_eq!(session.project, "/mnt/d/Research/XQ");
         assert_eq!(session.messages.len(), 3);
         assert_eq!(session.messages[0].role, Role::User);
-        assert!(session.messages[0]
-            .text()
-            .unwrap()
-            .contains("09-future-supercomputer.html"));
+        assert!(
+            session.messages[0]
+                .text()
+                .unwrap()
+                .contains("09-future-supercomputer.html")
+        );
         assert_eq!(session.messages[1].role, Role::Assistant);
-        assert!(session.messages[1].text().unwrap().contains("先读当前愿景页"));
+        assert!(
+            session.messages[1]
+                .text()
+                .unwrap()
+                .contains("先读当前愿景页")
+        );
         assert_eq!(session.messages[2].role, Role::Assistant);
-        assert!(session.messages[2].text().unwrap().contains("已完成路径对比小修"));
+        assert!(
+            session.messages[2]
+                .text()
+                .unwrap()
+                .contains("已完成路径对比小修")
+        );
 
         let texts: Vec<&str> = session.messages.iter().filter_map(|m| m.text()).collect();
         assert!(!texts.iter().any(|t| t.contains("environment_context")));
@@ -399,22 +444,110 @@ mod tests {
     }
 
     #[test]
-    fn source_collect_filters_sessions_outside_range() {
+    fn source_collect_uses_mtime_not_directory_date() {
         let tmp = tempfile::tempdir().unwrap();
         let sessions_dir = tmp.path().join(".codex/sessions");
-        // in range: 2026-07-15; out of range: 2026-07-01 and 2026-08-01
+        // Both older and newer directory names must remain eligible.
         for day in ["2026/07/15", "2026/07/01", "2026/08/01"] {
             let dir = sessions_dir.join(day);
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("rollout-x.jsonl"), SAMPLE).unwrap();
+            let path = dir.join("rollout-x.jsonl");
+            std::fs::write(&path, SAMPLE).unwrap();
+            File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(utc("2026-08-02T12:00:00Z").into())
+                .unwrap();
         }
 
         let source = CodexSource::new(tmp.path());
         let range = DateRange::new(d("2026-07-12"), d("2026-07-18")).unwrap();
         let mut warnings = Vec::new();
         let sessions = source.collect(&range, &mut warnings);
-        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions.len(), 3);
         assert_eq!(sessions[0].project, "/home/zhaoyilun/shop-api");
+        assert!(warnings.is_empty());
+        let buckets =
+            crate::collect::group_by_day(crate::collect::merge_sessions(sessions), &range);
+        assert!(!buckets.is_empty());
+        assert!(buckets.iter().all(|bucket| range.contains_day(bucket.date)));
+    }
+
+    #[test]
+    fn mtime_cutoff_is_inclusive_local_midnight_without_upper_bound() {
+        use chrono::TimeZone;
+        let range = DateRange::new(d("2026-07-12"), d("2026-07-18")).unwrap();
+        let start = Local
+            .from_local_datetime(&range.start.and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+            .unwrap();
+        let mut warnings = Vec::new();
+        for (time, expected) in [
+            (start - chrono::Duration::seconds(1), false),
+            (start, true),
+            (start + chrono::Duration::days(30), true),
+        ] {
+            assert_eq!(
+                modified_since_start(
+                    Path::new("test.jsonl"),
+                    Ok(time.into()),
+                    &range,
+                    &mut warnings
+                ),
+                expected
+            );
+        }
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn unavailable_mtime_warns_and_keeps_file() {
+        let range = DateRange::new(d("2026-07-12"), d("2026-07-18")).unwrap();
+        let mut warnings = Vec::new();
+        assert!(modified_since_start(
+            Path::new("test.jsonl"),
+            Err(std::io::Error::other("mtime unavailable")),
+            &range,
+            &mut warnings
+        ));
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn old_mtime_is_skipped_even_in_recent_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".codex/sessions/2026/07/15");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rollout.jsonl");
+        std::fs::write(&path, SAMPLE).unwrap();
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(utc("2026-07-01T12:00:00Z").into())
+            .unwrap();
+        let range = DateRange::new(d("2026-07-12"), d("2026-07-18")).unwrap();
+        let mut warnings = Vec::new();
+        assert!(
+            CodexSource::new(tmp.path())
+                .collect(&range, &mut warnings)
+                .is_empty()
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn missing_root_is_empty_without_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let range = DateRange::new(d("2026-07-12"), d("2026-07-18")).unwrap();
+        let mut warnings = Vec::new();
+        assert!(
+            CodexSource::new(tmp.path())
+                .collect(&range, &mut warnings)
+                .is_empty()
+        );
+        assert!(warnings.is_empty());
     }
 
     #[test]

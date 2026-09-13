@@ -22,6 +22,7 @@ sequenceDiagram
         Note over CLI,Sources: Reported sync failure stops the foreground command
     end
     CLI->>Sources: Read current HOME and configured devices/*/home
+    Note over CLI,Sources: Codex scans all date directories and skips files with mtime before the first local day
     Sources-->>CLI: Parsed sessions and source warnings
     CLI->>CLI: Merge sessions and deduplicate messages
     CLI->>CLI: Filter message dates and group by local day
@@ -93,9 +94,12 @@ sequenceDiagram
 
 ## Current limitations
 
-- Codex enumerates only date directories inside the requested interval. A
-  session stored under an earlier date can contain in-range messages that are
-  therefore missed.
+- Codex scans all session directories in both live and archived homes. Only
+  JSONL files with mtime before the first requested local day are skipped,
+  with no upper mtime cutoff. Message timestamps still determine inclusion.
+  This optimization assumes trustworthy file modification times. Restored or
+  externally modified timestamps can cause omissions. Unavailable mtime emits
+  a warning and the file is still read.
 - Markdown input loading excludes `index.md` but currently includes other
   Markdown files, including an existing `report.md` on repeated runs.
 - Archive enumeration can silently return no device homes on directory access

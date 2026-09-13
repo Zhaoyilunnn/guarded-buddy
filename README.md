@@ -26,6 +26,12 @@ Execution sequence and current limitations: [docs/wr-run.md](docs/wr-run.md).
 
 Collects conversation history from Codex / Cursor / Claude Code / Gemini under `$HOME`, writes per-day Markdown, then summarizes in the background to `report.md` (optional mutt email).
 
+Codex scans all session date directories in local and configured archive homes,
+skipping only JSONL files modified before the first requested local day (no upper
+mtime cutoff). Messages are then filtered by their own timestamps. This assumes
+trustworthy file modification times; unavailable mtime produces a warning and
+does not exclude the file.
+
 ```sh
 buddy wr run
 buddy wr collect --from 2026-07-12 --to 2026-07-18
