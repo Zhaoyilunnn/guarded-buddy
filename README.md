@@ -9,6 +9,7 @@ Binary: **`buddy`**
 ```text
 buddy
 |-- sync                   # archive local chat history to a shared directory
+|-- doctor                 # diagnose configured features without side effects
 |-- wr | weekly-report     # weekly AI chat report
 |   |-- collect | report | run
 |   |-- mail <report.md>
@@ -19,6 +20,11 @@ buddy
 |   `-- mail <signoff.md>
 `-- completions <bash|zsh|fish>
 ```
+
+### `doctor` - environment diagnostics
+
+For read-only environment checks, run `buddy doctor`. See
+[Environment diagnostics](docs/doctor.md) for activation rules and limitations.
 
 ### `wr` - weekly report
 

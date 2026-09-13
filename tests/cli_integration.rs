@@ -98,6 +98,41 @@ fn base_cmd() -> (tempfile::TempDir, Command) {
     (config_home, cmd)
 }
 
+#[test]
+fn doctor_empty_config_skips_optional_tools() {
+    let (_home, mut cmd) = base_cmd();
+    cmd.env("PATH", "").arg("doctor").assert().success()
+        .stdout(predicate::str::contains("SKIP  Email"))
+        .stdout(predicate::str::contains("FAIL").not());
+}
+
+#[test]
+fn doctor_api_missing_key_fails_without_showing_endpoint_secret() {
+    let (home, mut cmd) = base_cmd();
+    write(&home.path().join(".config/buddy/config.toml"),
+        "[llm]\nbackend = 'api'\napi_key_env = 'BUDDY_DOCTOR_TEST_KEY'\napi_base_url = 'https://example.com/private-endpoint'\n");
+    cmd.env_remove("BUDDY_DOCTOR_TEST_KEY").arg("doctor").assert().code(1)
+        .stdout(predicate::str::contains("FAIL  API key"))
+        .stdout(predicate::str::contains("private-endpoint").not());
+}
+
+#[test]
+fn doctor_invalid_config_is_structured_and_redacted() {
+    let (home, mut cmd) = base_cmd();
+    write(&home.path().join(".config/buddy/config.toml"), "token = 'private-secret' invalid");
+    cmd.arg("doctor").assert().code(1)
+        .stdout(predicate::str::contains("FAIL  Config"))
+        .stdout(predicate::str::contains("private-secret").not());
+}
+
+#[test]
+fn doctor_configured_email_requires_mutt() {
+    let (home, mut cmd) = base_cmd();
+    write(&home.path().join(".config/buddy/config.toml"), "[wr]\nmail_to = ['test@example.com']\n");
+    cmd.env("PATH", "").arg("doctor").assert().code(1)
+        .stdout(predicate::str::contains("mutt: install it"));
+}
+
 fn wait_for_file(path: &Path, timeout: Duration) -> String {
     let start = Instant::now();
     loop {

@@ -20,10 +20,16 @@ use clap_complete::generate;
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let default_home = dirs::home_dir().context("unable to determine $HOME directory")?;
+    if matches!(cli.command, Command::Doctor) {
+        let report = buddy::doctor::check(&default_home);
+        print!("{report}");
+        std::process::exit(if report.failed() { 1 } else { 0 });
+    }
     let config = Config::load(&Config::default_path(&default_home))?;
     let today = Local::now().date_naive();
 
     match cli.command {
+        Command::Doctor => unreachable!("doctor is dispatched before config loading"),
         Command::Sync(args) => {
             let settings = cli::resolve_sync(&args, &config, &default_home)?;
             run_sync(&settings)?;

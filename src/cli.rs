@@ -22,6 +22,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Diagnose configured features without network requests or file changes
+    Doctor,
     /// Incrementally archive local AI conversation history
     Sync(SyncArgs),
     /// Weekly report skill
