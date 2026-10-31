@@ -79,7 +79,7 @@
         <mxCell id="m10" value="Read current HOME + devices/*/home" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.1562;entryX=0;entryY=0.0;" edge="1" parent="1" source="act3" target="act1">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m11" value="Deduplicate sessions and messages" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.4167;entryX=1;entryY=0.6667;" edge="1" parent="1" source="act1" target="act1">
+        <mxCell id="m11" value="Select latest ChatGPT snapshots; deduplicate coding messages" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.4167;entryX=1;entryY=0.6667;" edge="1" parent="1" source="act1" target="act1">
           <mxGeometry relative="1" as="geometry">
             <Array as="points"><mxPoint x="1400" y="690"/><mxPoint x="1400" y="720"/></Array>
           </mxGeometry>

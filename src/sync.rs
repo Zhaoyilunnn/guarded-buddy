@@ -134,12 +134,13 @@ fn absolute(path: &Path) -> PathBuf {
     }
 }
 
-fn history_roots(home: &Path) -> [PathBuf; 4] {
+fn history_roots(home: &Path) -> [PathBuf; 5] {
     [
         home.join(".codex/sessions"),
         home.join(".cursor/projects"),
         home.join(".claude/projects"),
         home.join(".gemini"),
+        crate::web::history_root(home),
     ]
 }
 
@@ -176,6 +177,11 @@ fn history_files(home: &Path, selected: Option<&[AgentKind]>) -> Vec<PathBuf> {
         if history.is_file() {
             files.push(history);
         }
+    }
+    if enabled(AgentKind::Chatgpt) {
+        collect_matching(&crate::web::history_root(home), &mut files, |p| {
+            extension(p, "json")
+        });
     }
     files.sort();
     files.dedup();

@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Buddy ChatGPT Sync",
+  "version": "0.1.0",
+  "description": "Archive ChatGPT conversations to your local buddy receiver.",
+  "permissions": ["storage", "unlimitedStorage", "alarms", "activeTab"],
+  "host_permissions": ["https://chatgpt.com/*", "http://127.0.0.1/*"],
+  "background": {"service_worker": "background.js", "type": "module"},
+  "action": {"default_popup": "popup.html"}
+}

@@ -2,6 +2,7 @@
 
 This sequence describes the current `buddy wr run` implementation. Collection runs
 in the foreground; summarization and optional email run in a separate worker.
+ChatGPT snapshots must first be received through [browser sync](chatgpt-sync.md).
 The output root is configurable; `out/<range>` below denotes its default layout.
 
 ```mermaid
@@ -24,7 +25,7 @@ sequenceDiagram
     CLI->>Sources: Read current HOME and configured devices/*/home
     Note over CLI,Sources: Codex scans all date directories and skips files with mtime before the first local day
     Sources-->>CLI: Parsed sessions and source warnings
-    CLI->>CLI: Merge sessions and deduplicate messages
+    CLI->>CLI: Select latest ChatGPT snapshots and current branches; merge coding sessions
     CLI->>CLI: Filter message dates and group by local day
     CLI->>Files: Write daily Markdown and index.md
     CLI-->>User: Collection summary and warnings

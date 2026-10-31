@@ -1,4 +1,4 @@
-//! Data source abstraction: `HistorySource` trait and registry of four agent implementations.
+//! Data source abstraction: `HistorySource` trait and registry of supported history implementations.
 //!
 //! Open/closed principle: add a new agent = add a `sources/<agent>.rs` module +
 //! one line in `default_sources`, without modifying existing code.
@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::domain::{AgentKind, DateRange, Session};
 
+pub mod chatgpt;
 pub mod claude;
 pub mod codex;
 pub mod cursor;
@@ -46,7 +47,7 @@ pub trait HistorySource: Send + Sync {
     fn collect(&self, range: &DateRange, warnings: &mut Vec<SourceError>) -> Vec<Session>;
 }
 
-/// Default registry order: Codex, Cursor, Claude, then Gemini.
+/// Default registry order: Codex, Cursor, Claude, Gemini, then ChatGPT.
 pub fn default_sources(home: &Path) -> Vec<Box<dyn HistorySource>> {
     default_sources_opts(home, false)
 }
@@ -61,6 +62,7 @@ pub fn default_sources_opts(
         Box::new(cursor::CursorSource::new(home)),
         Box::new(claude::ClaudeSource::new(home)),
         Box::new(gemini::GeminiSource::new(home).include_prompt_history(include_prompt_history)),
+        Box::new(chatgpt::ChatgptSource::new(home)),
     ]
 }
 
@@ -94,10 +96,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_sources_returns_four_in_order_with_roots_under_home() {
+    fn default_sources_returns_five_in_order_with_roots_under_home() {
         let home = Path::new("/fake/home");
         let sources = default_sources(home);
-        assert_eq!(sources.len(), 4);
+        assert_eq!(sources.len(), 5);
         let kinds: Vec<AgentKind> = sources.iter().map(|s| s.kind()).collect();
         assert_eq!(
             kinds,
@@ -105,11 +107,16 @@ mod tests {
                 AgentKind::Codex,
                 AgentKind::Cursor,
                 AgentKind::Claude,
-                AgentKind::Gemini
+                AgentKind::Gemini,
+                AgentKind::Chatgpt
             ]
         );
         for s in &sources {
-            assert!(s.root().starts_with(home), "root not under home: {:?}", s.root());
+            assert!(
+                s.root().starts_with(home),
+                "root not under home: {:?}",
+                s.root()
+            );
         }
     }
 

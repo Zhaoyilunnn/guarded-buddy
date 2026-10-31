@@ -27,6 +27,7 @@ buddy does not copy the entire HOME directory. It copies only records supported 
 
 | Source | Synced content |
 | --- | --- |
+| ChatGPT web | JSON snapshots under `.local/share/buddy/web/chatgpt` (excludes the pairing token) |
 | Codex | JSONL files under `.codex/sessions` |
 | Cursor | JSONL files under `agent-transcripts` in `.cursor/projects` |
 | Claude | JSONL files under `.claude/projects` |
@@ -39,7 +40,7 @@ The destination is namespaced by device:
 `-- devices/
     |-- work-laptop/
     |   |-- .buddy-sync-manifest.json
-    |   `-- home/.codex|.cursor|.claude|.gemini/...
+    |   `-- home/.codex|.cursor|.claude|.gemini|.local/share/buddy/web/chatgpt/...
     `-- home-pc/
         |-- .buddy-sync-manifest.json
         `-- home/...
@@ -67,7 +68,10 @@ With a complete `[sync]` configuration:
 - `buddy wr report` summarizes previously generated daily Markdown and does not read raw history again.
 - Without `[sync]`, all `wr` commands retain their original local-only behavior.
 
-The archive and current HOME can contain copies of the same session. Collection deduplicates them by agent, session ID, project, and message content.
+The archive and current HOME can contain copies of the same session. Collection deduplicates coding histories by agent, session ID, project, and message content.
+ChatGPT web histories select the newest complete snapshot per account and conversation
+before reading the current branch and filtering message dates. See [ChatGPT sync](chatgpt-sync.md).
+`buddy sync` copies already received snapshots; it does not contact ChatGPT or trigger the extension.
 
 ## Sequence diagram
 
@@ -93,7 +97,7 @@ sequenceDiagram
     Note over Buddy: With [sync] configured, wr run performs sync first
     User->>Buddy: buddy wr run
     Buddy->>Collect: Read current HOME + devices/*/home
-    Collect->>Collect: Deduplicate sessions and messages
+    Collect->>Collect: Select latest ChatGPT snapshots; deduplicate coding messages
     Collect-->>Buddy: Create daily Markdown for the date range
     Buddy->>LLM: Submit the weekly-report prompt
     LLM-->>Buddy: Return the weekly report

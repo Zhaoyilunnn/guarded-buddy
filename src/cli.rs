@@ -1,4 +1,4 @@
-//! CLI: nested skills `wr` / `signoff` / `completions`.
+//! CLI: nested skills `wr` / `signoff`, history sync, and browser ingestion.
 
 use std::path::PathBuf;
 
@@ -24,6 +24,8 @@ pub struct Cli {
 pub enum Command {
     /// Diagnose configured features without network requests or file changes
     Doctor,
+    /// Receive ChatGPT conversations from the browser extension
+    Web(WebArgs),
     /// Incrementally archive local AI conversation history
     Sync(SyncArgs),
     /// Weekly report skill
@@ -33,6 +35,35 @@ pub enum Command {
     Signoff(SignoffArgs),
     /// Generate shell completion script
     Completions(CompletionsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WebArgs {
+    #[command(subcommand)]
+    pub command: WebCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WebCommand {
+    /// Run the loopback-only receiver until Ctrl-C
+    Serve {
+        #[arg(long, default_value_t = 18242)]
+        port: u16,
+        #[arg(long)]
+        home: Option<PathBuf>,
+    },
+    /// Print the local pairing token (creates it if missing)
+    Pair {
+        #[arg(long)]
+        home: Option<PathBuf>,
+    },
+    /// Show receiver health and locally saved conversation count
+    Status {
+        #[arg(long, default_value_t = 18242)]
+        port: u16,
+        #[arg(long)]
+        home: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -208,7 +239,7 @@ pub enum CliError {
     Range(#[from] DomainError),
     #[error("unknown backend: {0} (expected: cli, api)")]
     InvalidBackend(String),
-    #[error("unknown agent: {0} (expected: codex, cursor, claude, gemini)")]
+    #[error("unknown agent: {0} (expected: codex, cursor, claude, gemini, chatgpt)")]
     InvalidAgent(String),
     #[error("sync path is not configured (set [sync].path or pass --path)")]
     MissingSyncPath,

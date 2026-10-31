@@ -2,21 +2,23 @@
 
 use chrono::{DateTime, Duration, Local, NaiveDate};
 
-/// Supported AI coding assistant kinds. Rendering and CLI filtering use the fixed order in `ALL`.
+/// Supported AI conversation source kinds. Rendering and CLI filtering use the fixed order in `ALL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AgentKind {
     Codex,
     Cursor,
     Claude,
     Gemini,
+    Chatgpt,
 }
 
 impl AgentKind {
-    pub const ALL: [AgentKind; 4] = [
+    pub const ALL: [AgentKind; 5] = [
         AgentKind::Codex,
         AgentKind::Cursor,
         AgentKind::Claude,
         AgentKind::Gemini,
+        AgentKind::Chatgpt,
     ];
 
     /// User-facing name (used in Markdown headings).
@@ -26,6 +28,7 @@ impl AgentKind {
             AgentKind::Cursor => "Cursor",
             AgentKind::Claude => "Claude Code",
             AgentKind::Gemini => "Gemini",
+            AgentKind::Chatgpt => "ChatGPT",
         }
     }
 
@@ -36,6 +39,7 @@ impl AgentKind {
             AgentKind::Cursor => "cursor",
             AgentKind::Claude => "claude",
             AgentKind::Gemini => "gemini",
+            AgentKind::Chatgpt => "chatgpt",
         }
     }
 
@@ -285,12 +289,8 @@ mod tests {
     fn time_window_filters_across_midnight() {
         let end = local_dt(d("2026-07-18").and_hms_opt(9, 0, 0).unwrap());
         let window = TimeWindow::last_hours(24, end);
-        assert!(window.contains_ts(&local_dt(
-            d("2026-07-17").and_hms_opt(10, 0, 0).unwrap()
-        )));
-        assert!(!window.contains_ts(&local_dt(
-            d("2026-07-17").and_hms_opt(8, 0, 0).unwrap()
-        )));
+        assert!(window.contains_ts(&local_dt(d("2026-07-17").and_hms_opt(10, 0, 0).unwrap())));
+        assert!(!window.contains_ts(&local_dt(d("2026-07-17").and_hms_opt(8, 0, 0).unwrap())));
         let cover = window.covering_date_range();
         assert_eq!(cover.start, d("2026-07-17"));
         assert_eq!(cover.end, d("2026-07-18"));
@@ -313,14 +313,15 @@ mod tests {
     }
 
     #[test]
-    fn agent_kind_order_is_codex_cursor_claude_gemini() {
+    fn agent_kind_order_is_codex_cursor_claude_gemini_chatgpt() {
         assert_eq!(
             AgentKind::ALL,
             [
                 AgentKind::Codex,
                 AgentKind::Cursor,
                 AgentKind::Claude,
-                AgentKind::Gemini
+                AgentKind::Gemini,
+                AgentKind::Chatgpt
             ]
         );
     }

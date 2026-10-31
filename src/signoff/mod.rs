@@ -82,7 +82,10 @@ pub fn ingest(settings: &SignoffSettings) -> std::io::Result<SignoffIngest> {
     let sources = sources::default_sources(&settings.home);
     let mut warnings = Vec::new();
     let mut sessions = Vec::new();
-    for source in &sources {
+    for source in sources
+        .iter()
+        .filter(|s| s.kind() != crate::domain::AgentKind::Chatgpt)
+    {
         sessions.extend(source.collect(&covering, &mut warnings));
     }
     sessions = filter_sessions_to_window(sessions, &window);

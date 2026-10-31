@@ -38,10 +38,20 @@ pub fn build_aggregate_sources(
     homes.push(home.to_path_buf());
     homes.sort();
     homes.dedup();
-    homes
+    let mut result: Vec<Box<dyn HistorySource>> = homes
         .iter()
         .flat_map(|root| build_sources(root, agents, include_prompt_history))
-        .collect()
+        .filter(|source| source.kind() != AgentKind::Chatgpt)
+        .collect();
+    if agents
+        .as_ref()
+        .is_none_or(|a| a.contains(&AgentKind::Chatgpt))
+    {
+        result.push(Box::new(sources::chatgpt::ChatgptSource::from_homes(
+            &homes,
+        )));
+    }
+    result
 }
 
 /// Collect and write files under `out_dir/<range.dir_name()>/`.

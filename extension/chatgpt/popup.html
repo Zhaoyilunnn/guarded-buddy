@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Buddy ChatGPT Sync</title><style>
+body { width: 340px; padding: 16px; font: 14px system-ui; color: #172033; background: #f6f8fc; }
+h1 { font-size: 18px; } label { display: block; margin: 12px 0; } input[type=text], input[type=password], input[type=number] { box-sizing: border-box; width: 100%; padding: 7px; margin-top: 4px; }
+button { padding: 8px; margin: 4px 0; cursor: pointer; } pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+</style></head>
+<body>
+<h1>Buddy · ChatGPT</h1>
+<p>Run <code>buddy web serve</code>. Paste the token from <code>buddy web pair</code>.</p>
+<label>Receiver port<input id="port" type="number" min="1" max="65535" value="18242"></label>
+<label>Pairing token<input id="token" type="password" autocomplete="off"></label>
+<label><input id="autoSync" type="checkbox"> Sync every 15 minutes</label>
+<button id="connect">Save and connect</button>
+<hr>
+<button id="current">Save current conversation</button>
+<button id="sync">Sync history</button>
+<button id="full">Recheck all history</button>
+<pre id="status" role="status"></pre>
+<script src="popup.js" type="module"></script>
+</body></html>

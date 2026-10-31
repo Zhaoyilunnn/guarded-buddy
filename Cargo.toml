@@ -25,6 +25,10 @@ toml = "1.1.3"
 wait-timeout = "0.2.1"
 walkdir = "2.5.0"
 
+axum = "0.8.6"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "signal"] }
+rand = "0.10.3"
+
 [dev-dependencies]
 assert_cmd = "2.2.2"
 predicates = "3.1.4"

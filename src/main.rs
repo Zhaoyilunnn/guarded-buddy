@@ -30,6 +30,7 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Doctor => unreachable!("doctor is dispatched before config loading"),
+        Command::Web(args) => buddy::web::run(args.command, &default_home)?,
         Command::Sync(args) => {
             let settings = cli::resolve_sync(&args, &config, &default_home)?;
             run_sync(&settings)?;

@@ -21,7 +21,7 @@
     {"note": "With [sync] configured, wr run performs sync first; --no-sync skips it", "over": "buddy"},
     {"from": "user", "to": "buddy", "label": "buddy wr run"},
     {"from": "buddy", "to": "collect", "label": "Read current HOME + devices/*/home"},
-    {"from": "collect", "to": "collect", "label": "Deduplicate sessions and messages"},
+    {"from": "collect", "to": "collect", "label": "Select latest ChatGPT snapshots; deduplicate coding messages"},
     {"from": "collect", "to": "buddy", "label": "Create daily Markdown for the date range", "return": true},
     {"from": "buddy", "to": "llm", "label": "Submit the weekly-report prompt"},
     {"from": "llm", "to": "buddy", "label": "Return the weekly report", "return": true},
