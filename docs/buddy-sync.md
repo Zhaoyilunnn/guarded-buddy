@@ -27,20 +27,21 @@ buddy does not copy the entire HOME directory. It copies only records supported 
 
 | Source | Synced content |
 | --- | --- |
-| ChatGPT web | JSON snapshots under `.local/share/buddy/web/chatgpt` (excludes the pairing token) |
+| ChatGPT web | Local JSON snapshots archived to shared `chatgpt/<account>/<conversation-id>/<hash>.json` (excludes the pairing token) |
 | Codex | JSONL files under `.codex/sessions` |
 | Cursor | JSONL files under `agent-transcripts` in `.cursor/projects` |
 | Claude | JSONL files under `.claude/projects` |
 | Gemini | Classic session JSON, `.project_root`, Antigravity transcripts, and `history.jsonl` |
 
-The destination is namespaced by device:
+Coding history is namespaced by device. ChatGPT snapshots use the shared
+`chatgpt/<account>/<conversation-id>/<SHA-256 snapshot hash>.json` area instead:
 
 ```text
 <sync.path>/
 `-- devices/
     |-- work-laptop/
     |   |-- .buddy-sync-manifest.json
-    |   `-- home/.codex|.cursor|.claude|.gemini|.local/share/buddy/web/chatgpt/...
+    |   `-- home/.codex|.cursor|.claude|.gemini/...
     `-- home-pc/
         |-- .buddy-sync-manifest.json
         `-- home/...

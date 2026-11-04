@@ -24,6 +24,12 @@ impl ChatgptSource {
             roots: homes.iter().map(|h| history_root(h)).collect(),
         }
     }
+    pub fn with_archive(mut self, archive: Option<&Path>) -> Self {
+        if let Some(archive) = archive {
+            self.roots.push(archive.join("chatgpt"));
+        }
+        self
+    }
 }
 
 fn timestamp(value: &Value) -> Option<DateTime<Local>> {

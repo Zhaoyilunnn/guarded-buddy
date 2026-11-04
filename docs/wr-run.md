@@ -18,7 +18,7 @@ sequenceDiagram
     User->>CLI: Run with options
     CLI->>CLI: Load config and resolve date range and backend
     opt Sync configured and --no-sync absent
-        CLI->>Sources: Copy changed local histories to device archive
+        CLI->>Sources: Archive coding histories by device and ChatGPT snapshots in shared storage
         Sources-->>CLI: Sync result
         Note over CLI,Sources: Reported sync failure stops the foreground command
     end

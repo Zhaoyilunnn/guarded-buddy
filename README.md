@@ -86,7 +86,7 @@ Run `buddy web serve`, copy the token from `buddy web pair`, and load
 The extension can save the current ChatGPT conversation, sync history, and sync
 automatically every 15 minutes using your existing browser login.
 
-Saved text enters `wr` and the existing device archive. Weekly reports use the
+Saved text enters `wr` and the shared, device-independent ChatGPT archive. Weekly reports use the
 latest snapshot and current conversation branch; web chats do not enter signoff.
 Setup, recovery, permissions, and limitations: [ChatGPT sync](docs/chatgpt-sync.md).
 

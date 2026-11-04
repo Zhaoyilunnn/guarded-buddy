@@ -10,6 +10,7 @@ name = "buddy"
 path = "src/main.rs"
 
 [dependencies]
+sha2 = "0.10"
 anyhow = "1.0.103"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.2", features = ["derive"] }

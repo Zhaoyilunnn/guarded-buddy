@@ -53,13 +53,18 @@ provider access tokens are sent to buddy. The raw conversation response can
 include nontext metadata and asset references. Images and attachments are not
 downloaded, and no OCR is performed.
 
-`buddy sync` copies only the ChatGPT JSON snapshots into the existing device HOME
-archive. It excludes the pairing token. Configure `[sync]` as described in
+`buddy sync` saves ChatGPT snapshots under
+`<sync-root>/chatgpt/<account>/<conversation-id>/<SHA-256 snapshot hash>.json`,
+independently of the capturing device. Different snapshots coexist, so an older
+device cannot overwrite newer conversation data. Identical snapshots deduplicate.
+Existing ChatGPT snapshots in device HOME archives are also copied into this
+shared area without deleting the originals. It excludes the pairing token. Configure `[sync]` as described in
 [buddy-sync.md](buddy-sync.md). The existing cloud-folder client replicates the
 archive; the receiver does not write directly to another device.
 
 `wr collect` and `wr run` select one complete snapshot per account and
-conversation across the live HOME and all configured archive homes. The provider
+conversation across the live HOME, the shared ChatGPT area, and legacy device
+archive homes. The provider
 update timestamp wins; capture time breaks ties. Selection happens before the
 report date filter, so old messages from an obsolete snapshot are not resurrected.
 The reader follows `current_node` back through its parents and includes visible

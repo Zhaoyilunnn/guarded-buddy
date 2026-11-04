@@ -47,9 +47,9 @@ pub fn build_aggregate_sources(
         .as_ref()
         .is_none_or(|a| a.contains(&AgentKind::Chatgpt))
     {
-        result.push(Box::new(sources::chatgpt::ChatgptSource::from_homes(
-            &homes,
-        )));
+        result.push(Box::new(
+            sources::chatgpt::ChatgptSource::from_homes(&homes).with_archive(archive_root),
+        ));
     }
     result
 }

@@ -110,6 +110,56 @@ fn sync_archives_only_chatgpt_snapshots_without_pairing_credentials() {
 }
 
 #[test]
+fn shared_snapshots_deduplicate_across_devices_and_keep_newer_revision() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let archive = tempfile::tempdir().unwrap();
+    let old = snapshot(100.0, "Old");
+    let new = snapshot(200.0, "New");
+    save_snapshot(a.path(), &new).unwrap();
+    save_snapshot(b.path(), &new).unwrap();
+    let mut settings = buddy::cli::EffectiveSync {
+        path: archive.path().into(),
+        device: "a".into(),
+        home: a.path().into(),
+        agents: Some(vec![AgentKind::Chatgpt]),
+    };
+    assert_eq!(buddy::sync::sync(&settings).unwrap().created, 1);
+    settings.home = b.path().into();
+    settings.device = "b".into();
+    assert_eq!(buddy::sync::sync(&settings).unwrap().skipped, 1);
+    let legacy = archive.path().join("devices/legacy/home");
+    std::fs::create_dir_all(&legacy).unwrap();
+    save_snapshot(&legacy, &old).unwrap();
+    assert_eq!(buddy::sync::sync(&settings).unwrap().created, 1);
+    assert!(buddy::web::history_root(&legacy).exists());
+    let empty = tempfile::tempdir().unwrap();
+    let sources = buddy::app::build_aggregate_sources(
+        empty.path(),
+        Some(archive.path()),
+        &Some(vec![AgentKind::Chatgpt]),
+        false,
+    );
+    let mut warnings = vec![];
+    let sessions = sources[0].collect(&range(), &mut warnings);
+    assert!(warnings.is_empty());
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].messages[1].text(), Some("New"));
+    assert!(
+        !archive
+            .path()
+            .join("devices/a/home/.local/share/buddy/web/chatgpt")
+            .exists()
+    );
+    let count = walkdir::WalkDir::new(archive.path().join("chatgpt"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .count();
+    assert_eq!(count, 2);
+}
+
+#[test]
 fn malformed_branch_and_path_payloads_are_rejected() {
     let home = tempfile::tempdir().unwrap();
     let mut body = snapshot(100.0, "Answer");
