@@ -14,7 +14,21 @@ use serde_json::{Value, json};
 
 use crate::cli::WebCommand;
 
-pub const MAX_BODY: usize = 20 * 1024 * 1024;
+pub const DEFAULT_MAX_BODY_MIB: u64 = 100;
+
+fn max_body_bytes(
+    cli_mib: Option<u64>,
+    config: &crate::config::WebConfig,
+) -> anyhow::Result<usize> {
+    let mib = cli_mib
+        .or(config.max_body_mib)
+        .unwrap_or(DEFAULT_MAX_BODY_MIB);
+    let bytes = mib.checked_mul(1024 * 1024)
+        .filter(|bytes| *bytes > 0)
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .context("web.max_body_mib / --max-body-mib must be positive and fit in the platform's address space")?;
+    Ok(bytes)
+}
 
 pub fn history_root(home: &Path) -> PathBuf {
     home.join(".local/share/buddy/web/chatgpt")
@@ -230,7 +244,11 @@ async fn health(
     Ok(Json(json!({"app": "buddy", "schema_version": 1})))
 }
 
-pub fn run(command: WebCommand, default_home: &Path) -> anyhow::Result<()> {
+pub fn run(
+    command: WebCommand,
+    default_home: &Path,
+    config: &crate::config::WebConfig,
+) -> anyhow::Result<()> {
     match command {
         WebCommand::Pair { home } => println!(
             "{}",
@@ -262,7 +280,12 @@ pub fn run(command: WebCommand, default_home: &Path) -> anyhow::Result<()> {
             }
             println!("Receiver: online (127.0.0.1:{port})");
         }
-        WebCommand::Serve { port, home } => {
+        WebCommand::Serve {
+            port,
+            home,
+            max_body_mib,
+        } => {
+            let max_body = max_body_bytes(max_body_mib, config)?;
             let home = home.unwrap_or_else(|| default_home.to_path_buf());
             let token = pairing_token(&home)?;
             let receiver = Receiver {
@@ -274,11 +297,42 @@ pub fn run(command: WebCommand, default_home: &Path) -> anyhow::Result<()> {
             tokio::runtime::Runtime::new()?.block_on(async {
                 let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
                 let router = Router::new().route("/health", get(health)).route("/v1/chatgpt", post(ingest))
-                    .layer(DefaultBodyLimit::max(MAX_BODY)).with_state(receiver);
-                eprintln!("ChatGPT receiver: http://127.0.0.1:{port} (Ctrl-C to stop). Pair with buddy web pair.");
+                    .layer(DefaultBodyLimit::max(max_body)).with_state(receiver);
+                eprintln!("ChatGPT receiver: http://127.0.0.1:{port} (Ctrl-C to stop). Max request body: {} MiB. Pair with buddy web pair.", max_body / (1024 * 1024));
                 axum::serve(listener, router).with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; }).await
             })?;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::WebConfig;
+
+    #[test]
+    fn body_limit_uses_cli_then_config_then_default() {
+        assert_eq!(
+            max_body_bytes(None, &WebConfig::default()).unwrap(),
+            100 * 1024 * 1024
+        );
+        let config = WebConfig {
+            max_body_mib: Some(48),
+        };
+        assert_eq!(max_body_bytes(None, &config).unwrap(), 48 * 1024 * 1024);
+        assert_eq!(max_body_bytes(Some(64), &config).unwrap(), 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn body_limit_rejects_zero_and_overflow() {
+        for value in [0, u64::MAX] {
+            let config = WebConfig {
+                max_body_mib: Some(value),
+            };
+            assert!(max_body_bytes(None, &config).is_err());
+            assert!(max_body_bytes(Some(value), &WebConfig::default()).is_err());
+            assert!(max_body_bytes(Some(1), &config).is_ok());
+        }
+    }
 }

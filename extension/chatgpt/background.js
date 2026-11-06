@@ -9,12 +9,22 @@ async function settings() {
 
 async function receiver(config, path, payload) {
   if (!config.token) throw new Error("Paste the token from buddy web pair first.");
-  const response = await fetch(`http://127.0.0.1:${config.port}${path}`, {
-    method: payload ? "POST" : "GET",
-    headers: { Authorization: `Bearer ${config.token}`, ...(payload ? { "Content-Type": "application/json" } : {}) },
-    ...(payload ? { body: JSON.stringify(payload) } : {}),
-    signal: AbortSignal.timeout(15000),
-  });
+  const body = payload ? JSON.stringify(payload) : undefined;
+  const size = body ? `${(new TextEncoder().encode(body).byteLength / 1048576).toFixed(1)} MiB` : null;
+  let response;
+  try {
+    response = await fetch(`http://127.0.0.1:${config.port}${path}`, {
+      method: payload ? "POST" : "GET",
+      headers: { Authorization: `Bearer ${config.token}`, ...(payload ? { "Content-Type": "application/json" } : {}) },
+      ...(payload ? { body } : {}),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (error) {
+    throw new Error(`Buddy ${payload ? `upload (${size})` : "health check"} failed: ${error.message || String(error)}. Check buddy web serve${payload ? " and its web.max_body_mib setting" : ""}.`);
+  }
+  if (response.status === 413) {
+    throw new Error(`Buddy upload (${size}) exceeds the receiver size limit. Increase [web] max_body_mib in ~/.config/buddy/config.toml or use buddy web serve --max-body-mib, then restart the receiver and retry.`);
+  }
   if (!response.ok) throw new Error(`Buddy receiver HTTP ${response.status}. Check the token and buddy web serve.`);
   const result = await response.json();
   if (path === "/health" && (result.app !== "buddy" || result.schema_version !== 1)) {

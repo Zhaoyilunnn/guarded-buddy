@@ -12,7 +12,14 @@ pub struct Config {
     pub llm: LlmConfig,
     pub wr: WrConfig,
     pub sync: SyncConfig,
+    pub web: WebConfig,
     pub signoff: SignoffConfig,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct WebConfig {
+    pub max_body_mib: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
@@ -133,6 +140,8 @@ mail_to = ["weekly@example.com"]
 [sync]
 path = "/tmp/buddy-archive"
 device = "work-laptop"
+[web]
+max_body_mib = 48
 [signoff]
 window_hours = 24
 mail_to = ["me@example.com"]
@@ -155,6 +164,7 @@ trust = "workspace-write"
             Some(std::path::Path::new("/tmp/buddy-archive"))
         );
         assert_eq!(config.sync.device.as_deref(), Some("work-laptop"));
+        assert_eq!(config.web.max_body_mib, Some(48));
         assert_eq!(
             config.wr.mail_to.as_deref(),
             Some(["weekly@example.com".to_string()].as_slice())

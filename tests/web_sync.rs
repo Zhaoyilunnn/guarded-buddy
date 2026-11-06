@@ -200,12 +200,16 @@ impl Drop for ReceiverProcess {
 fn receiver_and_cli_collect_enforce_auth_and_render_current_branch() {
     let home = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
+    let config_dir = home.path().join(".config/buddy");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.toml"), "[web]\nmax_body_mib = 48\n").unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     let token = buddy::web::pairing_token(home.path()).unwrap();
     let mut child = ReceiverProcess(
         std::process::Command::new(assert_cmd::cargo::cargo_bin!("buddy"))
+            .env("HOME", home.path())
             .args([
                 "web",
                 "serve",
@@ -221,7 +225,7 @@ fn receiver_and_cli_collect_enforce_auth_and_render_current_branch() {
     );
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
-        .timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .unwrap();
     let base = format!("http://127.0.0.1:{port}");
@@ -265,13 +269,15 @@ fn receiver_and_cli_collect_enforce_auth_and_render_current_branch() {
         client
             .post(format!("{base}/v1/chatgpt"))
             .bearer_auth(&token)
-            .body(vec![b' '; buddy::web::MAX_BODY + 1])
+            .body(vec![b' '; 48 * 1024 * 1024 + 1])
             .send()
             .unwrap()
             .status(),
         413
     );
-    let payload = snapshot(100.0, "Current answer");
+    let mut payload = snapshot(100.0, "Current answer");
+    // Preserve large provider metadata without expanding the rendered conversation.
+    payload.conversation["metadata"] = json!("x".repeat(40 * 1024 * 1024));
     let post = || {
         client
             .post(format!("{base}/v1/chatgpt"))
@@ -317,6 +323,12 @@ fn receiver_and_cli_collect_enforce_auth_and_render_current_branch() {
         ])
         .assert()
         .success();
+    let mut warnings = vec![];
+    let sessions =
+        buddy::sources::chatgpt::ChatgptSource::new(home.path()).collect(&range(), &mut warnings);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].messages[1].text(), Some("Current answer"));
     assert_cmd::Command::new(assert_cmd::cargo::cargo_bin!("buddy"))
         .args([
             "wr",

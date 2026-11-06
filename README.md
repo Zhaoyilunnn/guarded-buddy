@@ -132,6 +132,9 @@ mail_to = ["weekly@example.com"]
 path = "/path/to/cloud-synced-folder/buddy-history"
 device = "work-laptop"          # unique and stable on every device
 
+[web]
+max_body_mib = 100             # maximum browser upload request size in MiB
+
 [signoff]
 window_hours = 24
 mail_to = ["me@example.com"]

@@ -150,9 +150,6 @@ impl HistorySource for ChatgptSource {
                 let path = entry.path();
                 let result = (|| -> anyhow::Result<Snapshot> {
                     let file = std::fs::File::open(path)?;
-                    if file.metadata()?.len() > crate::web::MAX_BODY as u64 {
-                        anyhow::bail!("snapshot exceeds size limit");
-                    }
                     let snapshot: Snapshot =
                         serde_json::from_reader(std::io::BufReader::new(file))?;
                     snapshot.validate()?;

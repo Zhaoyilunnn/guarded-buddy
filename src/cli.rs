@@ -47,6 +47,9 @@ pub struct WebArgs {
 pub enum WebCommand {
     /// Run the loopback-only receiver until Ctrl-C
     Serve {
+        /// Maximum request body in MiB (config: web.max_body_mib; default: 100)
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        max_body_mib: Option<u64>,
         #[arg(long, default_value_t = 18242)]
         port: u16,
         #[arg(long)]

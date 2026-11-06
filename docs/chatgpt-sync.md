@@ -33,6 +33,21 @@ receiver credential: keep it private. It is separate from your ChatGPT login.
 when the receiver is unavailable. No service installation or automatic process
 startup is performed.
 
+The receiver accepts request bodies up to 100 MiB by default. To persist a different
+limit, add this section to `~/.config/buddy/config.toml`:
+
+```toml
+[web]
+max_body_mib = 100
+```
+
+For a temporary override, run `buddy web serve --max-body-mib 200`. Priority is
+CLI flag > config > default; values must be positive whole MiB. Configuration is
+loaded from the current user's HOME, even when `--home` selects another data HOME.
+Restart the receiver after changing the configuration. Its startup message shows
+the effective limit. This setting limits HTTP uploads; local snapshot collection
+reads saved snapshots independently of this upload limit.
+
 ## Storage and report behavior
 
 Snapshots are stored as versioned JSON envelopes containing the provider's raw
@@ -100,10 +115,16 @@ from `signoff` ingestion and automatic actions.
   that account before recovery can finish.
 - The browser must be running for alarms to run. Closing the popup does not
   cancel synchronization. The receiver must be reachable for delivery.
+- HTTP 413 means a snapshot exceeds the receiver's request size limit. Increase
+  `[web] max_body_mib` or pass `--max-body-mib`, restart the receiver, and retry
+  **Sync history**. The queued snapshot is retained for redelivery. A failed local
+  network request also shows the upload size and identifies the Buddy receiver;
+  a connection closed during an oversized upload may appear as a network failure
+  rather than HTTP 413. No conversation payloads or credentials are logged.
 - Deleting a provider conversation or a local source file does not delete an
   archived copy. This is a one-way archive, not a browser history restore tool.
 
-The receiver accepts at most 20 MiB per request and listens only on IPv4 loopback.
+The receiver enforces the configured request body limit and listens only on IPv4 loopback.
 It validates the Host, bearer token, and any supplied Origin, and exposes no CORS
 access to ordinary websites. Storage paths and filenames are constrained, symlink
 storage destinations are rejected, and newly created files/directories are private

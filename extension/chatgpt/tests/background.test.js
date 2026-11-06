@@ -10,6 +10,7 @@ test("sync checkpoints, current saves, offline queue and worker restart", async 
   let details = 0;
   let writes = 0;
   let failIngest = false;
+  let ingestStatus = 200;
   let updated = 100;
   globalThis.chrome = {
     storage: { local: {
@@ -37,7 +38,8 @@ test("sync checkpoints, current saves, offline queue and worker restart", async 
       const payload = JSON.parse(options.body);
       assert.equal(payload.account.length, 64);
       assert.equal(options.body.includes("provider-secret"), false);
-      if (failIngest) throw new Error("Receiver offline");
+      if (failIngest) throw new TypeError("Failed to fetch");
+      if (ingestStatus !== 200) return { ok: false, status: ingestStatus };
       writes++;
       return reply({ status: "created" });
     }
@@ -68,7 +70,7 @@ test("sync checkpoints, current saves, offline queue and worker restart", async 
   updated = 200;
   failIngest = true;
   await send({ type: "sync" });
-  assert.match(data.status.error, /offline/);
+  assert.match(data.status.error, /Buddy upload.*MiB.*Failed to fetch/);
   assert.equal(data.pending.conversation.update_time, 200);
   assert.ok(data.activeProgress);
   assert.ok(data.status.retryAt > Date.now());
@@ -84,4 +86,13 @@ test("sync checkpoints, current saves, offline queue and worker restart", async 
   await send({ type: "sync", full: true });
   assert.equal(writes, 5);
   assert.equal(data.status.saved, 1);
+  ingestStatus = 413;
+  await send({ type: "sync", full: true });
+  assert.match(data.status.error, /exceeds.*size limit/);
+  assert.match(data.status.error, /max_body_mib/);
+  assert.ok(data.pending);
+  ingestStatus = 200;
+  await send({ type: "sync" });
+  assert.equal(data.status.error, null);
+  assert.equal(data.pending, undefined);
 });
