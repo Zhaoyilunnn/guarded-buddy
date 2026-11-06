@@ -95,7 +95,7 @@ fn sync_archives_only_chatgpt_snapshots_without_pairing_credentials() {
         agents: Some(vec![AgentKind::Chatgpt]),
     };
     assert_eq!(buddy::sync::sync(&settings).unwrap().created, 1);
-    assert_eq!(buddy::sync::sync(&settings).unwrap().skipped, 1);
+    assert_eq!(buddy::sync::sync(&settings).unwrap().created, 0);
     assert!(
         !archive
             .path()
@@ -110,7 +110,7 @@ fn sync_archives_only_chatgpt_snapshots_without_pairing_credentials() {
 }
 
 #[test]
-fn shared_snapshots_deduplicate_across_devices_and_keep_newer_revision() {
+fn shared_conversations_keep_only_latest_and_migrate_device_copies() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
     let archive = tempfile::tempdir().unwrap();
@@ -131,8 +131,22 @@ fn shared_snapshots_deduplicate_across_devices_and_keep_newer_revision() {
     let legacy = archive.path().join("devices/legacy/home");
     std::fs::create_dir_all(&legacy).unwrap();
     save_snapshot(&legacy, &old).unwrap();
-    assert_eq!(buddy::sync::sync(&settings).unwrap().created, 1);
-    assert!(buddy::web::history_root(&legacy).exists());
+    let result = buddy::sync::sync(&settings).unwrap();
+    assert_eq!(result.created, 0);
+    assert!(result.failures.is_empty());
+    assert!(
+        !buddy::web::history_root(&legacy)
+            .join(&old.account)
+            .join("conversation-1.json")
+            .exists()
+    );
+    let canonical = archive
+        .path()
+        .join("chatgpt")
+        .join(&new.account)
+        .join("conversation-1.json");
+    let stored: Snapshot = serde_json::from_slice(&std::fs::read(&canonical).unwrap()).unwrap();
+    assert_eq!(stored.revision(), 200.0);
     let empty = tempfile::tempdir().unwrap();
     let sources = buddy::app::build_aggregate_sources(
         empty.path(),
@@ -154,9 +168,174 @@ fn shared_snapshots_deduplicate_across_devices_and_keep_newer_revision() {
     let count = walkdir::WalkDir::new(archive.path().join("chatgpt"))
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
+        .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "json"))
         .count();
-    assert_eq!(count, 2);
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn shared_store_replaces_newer_content_and_migrates_hash_history() {
+    let archive = tempfile::tempdir().unwrap();
+    let first = snapshot(100.0, "First");
+    let mut newest = snapshot(200.0, "Latest");
+    newest.captured_at = first.captured_at - chrono::Duration::hours(1);
+    let legacy = archive
+        .path()
+        .join("chatgpt")
+        .join(&first.account)
+        .join(first.id());
+    std::fs::create_dir_all(&legacy).unwrap();
+    for (name, value) in [("old.json", &first), ("new.json", &newest)] {
+        std::fs::write(legacy.join(name), serde_json::to_vec(value).unwrap()).unwrap();
+    }
+    let result = buddy::sync::migrate_chatgpt(tempfile::tempdir().unwrap().path(), archive.path());
+    assert!(result.failures.is_empty(), "{:?}", result.failures);
+    assert!(!legacy.exists());
+    let path = archive
+        .path()
+        .join("chatgpt")
+        .join(&first.account)
+        .join("conversation-1.json");
+    let stored: Snapshot = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(stored.conversation, newest.conversation);
+    assert_eq!(
+        buddy::web::save_shared_snapshot(archive.path(), &first).unwrap(),
+        "stale"
+    );
+    assert_eq!(
+        buddy::web::save_shared_snapshot(archive.path(), &newest).unwrap(),
+        "skipped"
+    );
+    let mut edited = newest.clone();
+    edited.captured_at += chrono::Duration::seconds(1);
+    edited.conversation["title"] = json!("Renamed");
+    assert_eq!(
+        buddy::web::save_shared_snapshot(archive.path(), &edited).unwrap(),
+        "updated"
+    );
+    assert_eq!(
+        buddy::web::save_shared_snapshot(archive.path(), &newest).unwrap(),
+        "stale"
+    );
+    let mut warnings = vec![];
+    let sessions = buddy::sources::chatgpt::ChatgptSource::from_homes(&[])
+        .with_archive(Some(archive.path()))
+        .collect(&range(), &mut warnings);
+    assert!(warnings.is_empty());
+    assert_eq!(sessions.len(), 1);
+    assert!(sessions[0].project.starts_with("Renamed"));
+    assert_eq!(sessions[0].messages[1].text(), Some("Latest"));
+}
+
+#[test]
+fn failed_migration_retains_original_and_concurrent_writes_keep_newest() {
+    let home = tempfile::tempdir().unwrap();
+    let archive = tempfile::tempdir().unwrap();
+    let body = snapshot(100.0, "Recoverable");
+    save_snapshot(home.path(), &body).unwrap();
+    std::fs::write(archive.path().join("chatgpt"), "blocked destination").unwrap();
+    let result = buddy::sync::migrate_chatgpt(home.path(), archive.path());
+    assert!(!result.failures.is_empty());
+    assert!(
+        buddy::web::history_root(home.path())
+            .join(&body.account)
+            .join("conversation-1.json")
+            .is_file()
+    );
+    std::fs::remove_file(archive.path().join("chatgpt")).unwrap();
+    let barrier = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        let barrier = &barrier;
+        let handles = (1..=8)
+            .map(|revision| {
+                let root = archive.path();
+                scope.spawn(move || {
+                    let body = snapshot(revision as f64, &format!("Revision {revision}"));
+                    barrier.wait();
+                    buddy::web::save_shared_snapshot(root, &body).unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    });
+    let path = archive
+        .path()
+        .join("chatgpt")
+        .join(&body.account)
+        .join("conversation-1.json");
+    let stored: Snapshot = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(stored.revision(), 8.0);
+}
+
+#[cfg(unix)]
+#[test]
+fn wr_run_uses_latest_shared_conversation_and_consumes_old_local_copy() {
+    let home = tempfile::tempdir().unwrap();
+    let archive = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let config_dir = home.path().join(".config/buddy");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "[sync]\npath = {:?}\ndevice = \"report-test\"\n",
+            archive.path().to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let old = snapshot(100.0, "Obsolete local answer");
+    save_snapshot(home.path(), &old).unwrap();
+    buddy::web::save_shared_snapshot(archive.path(), &snapshot(200.0, "Latest shared answer"))
+        .unwrap();
+    assert_cmd::Command::new(assert_cmd::cargo::cargo_bin!("buddy"))
+        .env("HOME", home.path())
+        .args([
+            "wr",
+            "run",
+            "--agents",
+            "chatgpt",
+            "--days",
+            "2",
+            "--cmd",
+            "/bin/cat",
+            "--out",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let dir = std::fs::read_dir(out.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.is_dir())
+        .expect("report range directory");
+    for _ in 0..200 {
+        if dir.join("report.md").exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        dir.join("report.md").is_file(),
+        "{}",
+        std::fs::read_to_string(dir.join("report.log")).unwrap_or_default()
+    );
+    let notes = walkdir::WalkDir::new(&dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file() && e.file_name().to_string_lossy().starts_with("202"))
+        .map(|e| std::fs::read_to_string(e.path()).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(notes.contains("Latest shared answer"));
+    assert!(!notes.contains("Obsolete local answer"));
+    assert!(
+        !buddy::web::history_root(home.path())
+            .join(&old.account)
+            .join("conversation-1.json")
+            .exists()
+    );
 }
 
 #[test]
@@ -200,9 +379,17 @@ impl Drop for ReceiverProcess {
 fn receiver_and_cli_collect_enforce_auth_and_render_current_branch() {
     let home = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
+    let archive = tempfile::tempdir().unwrap();
     let config_dir = home.path().join(".config/buddy");
     std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(config_dir.join("config.toml"), "[web]\nmax_body_mib = 48\n").unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "[web]\nmax_body_mib = 48\n[sync]\npath = {:?}\ndevice = \"receiver-test\"\n",
+            archive.path().to_str().unwrap()
+        ),
+    )
+    .unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
@@ -313,6 +500,7 @@ fn receiver_and_cli_collect_enforce_auth_and_render_current_branch() {
         "skipped"
     );
     assert_cmd::Command::new(assert_cmd::cargo::cargo_bin!("buddy"))
+        .env("HOME", home.path())
         .args([
             "web",
             "status",
@@ -324,12 +512,28 @@ fn receiver_and_cli_collect_enforce_auth_and_render_current_branch() {
         .assert()
         .success();
     let mut warnings = vec![];
-    let sessions =
-        buddy::sources::chatgpt::ChatgptSource::new(home.path()).collect(&range(), &mut warnings);
+    let sessions = buddy::sources::chatgpt::ChatgptSource::new(home.path())
+        .with_archive(Some(archive.path()))
+        .collect(&range(), &mut warnings);
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(sessions.len(), 1);
+    assert!(
+        !buddy::web::history_root(home.path())
+            .join(&payload.account)
+            .join("conversation-1.json")
+            .exists()
+    );
+    assert!(
+        archive
+            .path()
+            .join("chatgpt")
+            .join(&payload.account)
+            .join("conversation-1.json")
+            .is_file()
+    );
     assert_eq!(sessions[0].messages[1].text(), Some("Current answer"));
     assert_cmd::Command::new(assert_cmd::cargo::cargo_bin!("buddy"))
+        .env("HOME", home.path())
         .args([
             "wr",
             "collect",

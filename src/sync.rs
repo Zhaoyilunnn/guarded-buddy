@@ -75,40 +75,22 @@ pub fn sync(settings: &EffectiveSync) -> Result<SyncOutcome, SyncError> {
 
     let manifest_path = device_root.join(MANIFEST);
     let mut manifest = load_manifest(&manifest_path)?;
-    let mut files = history_files(&settings.home, settings.agents.as_deref());
-    let mut chatgpt_files: std::collections::HashSet<PathBuf> = files
-        .iter()
-        .filter(|p| p.starts_with(crate::web::history_root(&settings.home)))
-        .cloned()
-        .collect();
-    if settings
+    let files = history_files(&settings.home, settings.agents.as_deref())
+        .into_iter()
+        .filter(|path| !path.starts_with(crate::web::history_root(&settings.home)))
+        .collect::<Vec<_>>();
+    let mut outcome = if settings
         .agents
         .as_ref()
         .is_none_or(|agents| agents.contains(&AgentKind::Chatgpt))
     {
-        for home in archive_homes(&settings.path) {
-            let mut legacy = Vec::new();
-            collect_matching(&crate::web::history_root(&home), &mut legacy, |p| {
-                extension(p, "json")
-            });
-            chatgpt_files.extend(legacy.iter().cloned());
-            files.extend(legacy);
-        }
-    }
-    let mut outcome = SyncOutcome::default();
+        migrate_chatgpt(&settings.home, &settings.path)
+    } else {
+        SyncOutcome::default()
+    };
 
     for source in files {
         outcome.scanned += 1;
-        if chatgpt_files.contains(&source) {
-            match archive_chatgpt(&source, &settings.path) {
-                Ok(true) => outcome.created += 1,
-                Ok(false) => outcome.skipped += 1,
-                Err(error) => outcome
-                    .failures
-                    .push(format!("{}: {error}", source.display())),
-            }
-            continue;
-        }
         let Ok(relative) = source.strip_prefix(&settings.home) else {
             continue;
         };
@@ -144,49 +126,48 @@ pub fn sync(settings: &EffectiveSync) -> Result<SyncOutcome, SyncError> {
     Ok(outcome)
 }
 
-/// Serialize the snapshot once so hashing and publication use the same immutable bytes.
-fn archive_chatgpt(source: &Path, archive: &Path) -> anyhow::Result<bool> {
-    use sha2::{Digest, Sha256};
-    let snapshot: crate::web::Snapshot =
-        serde_json::from_reader(std::io::BufReader::new(File::open(source)?))?;
-    snapshot.validate()?;
-    let bytes = serde_json::to_vec(&snapshot)?;
-    let hash = format!("{:x}", Sha256::digest(&bytes));
-    let parent = archive
-        .join("chatgpt")
-        .join(&snapshot.account)
-        .join(snapshot.id());
-    std::fs::create_dir_all(&parent)?;
-    let destination = parent.join(format!("{hash}.json"));
-    if destination.is_file() {
-        return Ok(false);
+/// Consolidate local, device-HOME, and legacy hash snapshots into one file per conversation.
+pub fn migrate_chatgpt(home: &Path, archive: &Path) -> SyncOutcome {
+    let mut outcome = SyncOutcome::default();
+    if let Err(error) = validate_target(home, archive) {
+        outcome.failures.push(error.to_string());
+        return outcome;
     }
-    let temp = parent.join(format!(
-        ".snapshot-{}-{:016x}.tmp",
-        std::process::id(),
-        rand::random::<u64>()
-    ));
-    let result = (|| -> std::io::Result<()> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+    let mut files = Vec::new();
+    let mut homes = archive_homes(archive);
+    homes.push(home.to_path_buf());
+    for home in homes {
+        collect_matching(&crate::web::history_root(&home), &mut files, |p| {
+            extension(p, "json")
+        });
+    }
+    let shared = archive.join("chatgpt");
+    collect_matching(&shared, &mut files, |p| {
+        extension(p, "json")
+            && p.strip_prefix(&shared)
+                .is_ok_and(|p| p.components().count() > 2)
+    });
+    files.sort();
+    files.dedup();
+    for source in files {
+        // A previous conversation merge may already have removed this legacy hash file.
+        if !source.exists() {
+            continue;
         }
-        let mut file = options.open(&temp)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&temp, &destination)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+        outcome.scanned += 1;
+        match crate::web::move_snapshot_to_shared(&source, archive) {
+            Ok("created") => outcome.created += 1,
+            Ok("updated") => outcome.updated += 1,
+            Ok(_) => outcome.skipped += 1,
+            Err(error) => outcome
+                .failures
+                .push(format!("{}: {error}", source.display())),
+        }
     }
-    result?;
-    Ok(true)
+    outcome
 }
 
-fn validate_target(home: &Path, target: &Path) -> Result<(), SyncError> {
+pub(crate) fn validate_target(home: &Path, target: &Path) -> Result<(), SyncError> {
     let target = absolute(target);
     for root in history_roots(home) {
         let root = absolute(&root);

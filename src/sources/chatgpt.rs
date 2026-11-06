@@ -158,11 +158,9 @@ impl HistorySource for ChatgptSource {
                 match result {
                     Ok(snapshot) => {
                         let key = (snapshot.account.clone(), snapshot.id().to_string());
-                        let replace = latest.get(&key).is_none_or(|(old, _)| {
-                            snapshot.revision() > old.revision()
-                                || (snapshot.revision() == old.revision()
-                                    && snapshot.captured_at > old.captured_at)
-                        });
+                        let replace = latest
+                            .get(&key)
+                            .is_none_or(|(old, _)| snapshot.newer_than(old));
                         if replace {
                             latest.insert(key, (snapshot, path.to_path_buf()));
                         }

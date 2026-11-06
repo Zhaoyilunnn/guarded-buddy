@@ -13,7 +13,7 @@
         <mxCell id="local" value="Current device HOME" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
           <mxGeometry x="540" y="40" width="100" height="960" as="geometry"/>
         </mxCell>
-        <mxCell id="archive" value="Device archive" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+        <mxCell id="archive" value="Shared archive" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
           <mxGeometry x="790" y="40" width="100" height="960" as="geometry"/>
         </mxCell>
         <mxCell id="provider" value="External sync provider" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
@@ -58,7 +58,7 @@
         <mxCell id="m3" value="Compute content digests" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.4286;entryX=0;entryY=0.1282;" edge="1" parent="1" source="act0" target="act4">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m4" value="Atomically create or update changed files" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.5714;entryX=0;entryY=0.137;" edge="1" parent="1" source="act0" target="act5">
+        <mxCell id="m4" value="Update coding files; consolidate latest ChatGPT conversations" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.5714;entryX=0;entryY=0.137;" edge="1" parent="1" source="act0" target="act5">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
         <mxCell id="m5" value="Atomically update the manifest" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.7143;entryX=0;entryY=0.2055;" edge="1" parent="1" source="act0" target="act5">
@@ -76,10 +76,10 @@
         <mxCell id="m9" value="buddy wr run" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.5729;entryX=0;entryY=0.0;" edge="1" parent="1" source="user" target="act3">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m10" value="Read current HOME + devices/*/home" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.1562;entryX=0;entryY=0.0;" edge="1" parent="1" source="act3" target="act1">
+        <mxCell id="m10" value="Read HOME, device archives, and shared ChatGPT files" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.1562;entryX=0;entryY=0.0;" edge="1" parent="1" source="act3" target="act1">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m11" value="Select latest ChatGPT snapshots; deduplicate coding messages" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.4167;entryX=1;entryY=0.6667;" edge="1" parent="1" source="act1" target="act1">
+        <mxCell id="m11" value="Read latest ChatGPT conversations; deduplicate coding messages" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.4167;entryX=1;entryY=0.6667;" edge="1" parent="1" source="act1" target="act1">
           <mxGeometry relative="1" as="geometry">
             <Array as="points"><mxPoint x="1400" y="690"/><mxPoint x="1400" y="720"/></Array>
           </mxGeometry>

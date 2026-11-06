@@ -50,38 +50,53 @@ reads saved snapshots independently of this upload limit.
 
 ## Storage and report behavior
 
-Snapshots are stored as versioned JSON envelopes containing the provider's raw
-conversation response and the local capture time:
+Each account/conversation has one JSON file containing its latest complete
+conversation response, schema version (`1`), and local capture time. With
+`[sync].path` configured, `buddy web serve` writes directly to:
 
 ```text
-~/.local/share/buddy/web/
-|-- token
-`-- chatgpt/
-    `-- <SHA-256 account namespace>/
-        `-- <conversation-id>.json
+<sync.path>/chatgpt/<SHA-256 account namespace>/<conversation-id>.json
 ```
 
-The schema version is currently `1`. Filenames use conversation IDs, so renaming
-a conversation updates the same file. The account namespace is derived from the
-logged-in user's ID; different accounts stay separate. No browser cookies or
-provider access tokens are sent to buddy. The raw conversation response can
-include nontext metadata and asset references. Images and attachments are not
+No separate `buddy sync` is needed to publish browser captures to that directory.
+Without `[sync].path`, the receiver writes to
+`~/.local/share/buddy/web/chatgpt/<account>/<conversation-id>.json`. The pairing
+token always stays at `~/.local/share/buddy/web/token`; it is never archived.
+`--home` changes that local data/token HOME, while configuration is still loaded
+from the invoking user's HOME. `web status` and receiver startup print the selected
+storage directory.
+
+New conversations create a file. Newer provider `update_time` values replace the
+existing file; equal provider times use `captured_at` as a tie-breaker. Identical
+conversation content is skipped and older versions are ignored. Capture time is
+only a retrieval-time tie-breaker, not proof that the provider returned newer
+content. Replacement writes a temporary file, syncs it, and renames it over the
+canonical file. An account lock serializes comparison and publication across
+receiver and sync processes on the same machine.
+
+`buddy sync` and receiver startup migrate existing local captures, device-HOME
+ChatGPT copies, and legacy `chatgpt/<account>/<conversation-id>/<hash>.json`
+archives into the same canonical files. They retain the newest complete version,
+then remove redundant source JSON files only after publication succeeds. Invalid
+files or failed writes produce errors and keep the affected source copies for
+recovery. Other providers' device archives are unchanged.
+
+The external cloud-folder client replicates the directory; buddy performs local
+filesystem operations. Use one writing device for the shared ChatGPT directory
+when strict ordering is required: filesystem locks do not coordinate disconnected
+cloud replicas, so concurrent writes from different devices can cause cloud-client
+conflicts or replacements.
+
+Renaming a conversation updates the same file. The account namespace is derived
+from the logged-in user's ID; different accounts stay separate. No browser cookies
+or provider access tokens are sent to buddy. Images and attachments are not
 downloaded, and no OCR is performed.
 
-`buddy sync` saves ChatGPT snapshots under
-`<sync-root>/chatgpt/<account>/<conversation-id>/<SHA-256 snapshot hash>.json`,
-independently of the capturing device. Different snapshots coexist, so an older
-device cannot overwrite newer conversation data. Identical snapshots deduplicate.
-Existing ChatGPT snapshots in device HOME archives are also copied into this
-shared area without deleting the originals. It excludes the pairing token. Configure `[sync]` as described in
-[buddy-sync.md](buddy-sync.md). The existing cloud-folder client replicates the
-archive; the receiver does not write directly to another device.
-
-`wr collect` and `wr run` select one complete snapshot per account and
-conversation across the live HOME, the shared ChatGPT area, and legacy device
-archive homes. The provider
-update timestamp wins; capture time breaks ties. Selection happens before the
-report date filter, so old messages from an obsolete snapshot are not resurrected.
+`wr collect` and `wr run` read the canonical shared files and any remaining legacy
+or local copies, selecting one latest complete conversation before filtering
+message dates. `wr run` still runs `buddy sync` first when configured (unless
+`--no-sync` is supplied); it never fetches ChatGPT itself. The provider update time
+wins; capture time breaks ties, so obsolete copies do not resurrect old messages.
 The reader follows `current_node` back through its parents and includes visible
 user/assistant text from that branch only. Other branches remain in the raw JSON.
 System messages, tool messages, hidden messages, and internal reasoning channels
@@ -105,8 +120,10 @@ from `signoff` ingestion and automatic actions.
 - A snapshot is queued in extension-local storage before delivery. The receiver
   writes through a temporary file and acknowledges only after replacing the live
   JSON file. Unchanged content is skipped and older provider revisions are ignored.
-- Pagination position and per-conversation acknowledgements survive extension
-  worker suspension. A one-minute alarm checks for incomplete work even when
+- Pagination position and per-conversation acknowledgements are scoped to the
+  receiver's storage identity and survive extension worker suspension. Changing
+  the storage directory starts fresh checkpoints, so a previous destination's
+  acknowledgements cannot skip delivery to the new destination. A one-minute alarm checks for incomplete work even when
   periodic sync is disabled. Interrupted items may be replayed safely.
 - Provider 429/5xx responses use bounded retries with backoff. Failed syncs retain
   their progress and retry after 15 minutes; the popup displays the failure.
@@ -147,7 +164,7 @@ The local protocol has two authenticated endpoints:
 
 | Endpoint | Behavior |
 | --- | --- |
-| `GET /health` | Returns `app: "buddy"` and `schema_version: 1` |
+| `GET /health` | Returns `app: "buddy"`, `schema_version: 1`, and `storage_id` (a digest identifying the storage directory) |
 | `POST /v1/chatgpt` | Accepts `schema_version`, `account`, `captured_at`, and `conversation`; returns `status` (`created`, `updated`, `skipped`, or `stale`) |
 
 ```mermaid
@@ -156,8 +173,8 @@ sequenceDiagram
     participant Extension as Browser extension
     participant ChatGPT as ChatGPT private API
     participant Receiver as buddy web serve
-    participant Local as Local ChatGPT snapshots
-    participant Archive as Device archive
+    participant Local as Local fallback directory
+    participant Archive as Shared ChatGPT directory
     participant Report as Weekly report collector
 
     User->>Extension: Pair with buddy web pair token
@@ -166,15 +183,19 @@ sequenceDiagram
     Extension->>ChatGPT: Use browser login to list and fetch conversations
     Extension->>Extension: Persist pending snapshot and pagination progress
     Extension->>Receiver: POST /v1/chatgpt with receiver token
-    Receiver->>Local: Validate and atomically save snapshot
+    alt sync.path configured
+        Receiver->>Archive: Compare revision and atomically replace conversation JSON
+    else local storage
+        Receiver->>Local: Compare revision and atomically replace conversation JSON
+    end
     Receiver-->>Extension: Acknowledge saved / skipped / stale
     Extension->>Extension: Persist checkpoint and clear pending snapshot
-    User->>Archive: buddy sync copies snapshots to device HOME archive
+    User->>Archive: buddy sync migrates legacy captures to canonical files
     Note over Archive: External sync product replicates the directory
     User->>Report: buddy wr collect / run
     Report->>Local: Read live snapshots
-    Report->>Archive: Read device snapshots
-    Report->>Report: Select newest snapshot, then current branch and report dates
+    Report->>Archive: Read latest canonical conversation files
+    Report->>Report: Select latest conversation, then current branch and message dates
     Report-->>User: Daily Markdown and weekly-report input
 ```
 

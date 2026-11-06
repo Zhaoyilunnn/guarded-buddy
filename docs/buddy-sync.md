@@ -27,17 +27,27 @@ buddy does not copy the entire HOME directory. It copies only records supported 
 
 | Source | Synced content |
 | --- | --- |
-| ChatGPT web | Local JSON snapshots archived to shared `chatgpt/<account>/<conversation-id>/<hash>.json` (excludes the pairing token) |
+| ChatGPT web | Latest complete conversation at shared `chatgpt/<account>/<conversation-id>.json` (excludes the pairing token) |
 | Codex | JSONL files under `.codex/sessions` |
 | Cursor | JSONL files under `agent-transcripts` in `.cursor/projects` |
 | Claude | JSONL files under `.claude/projects` |
 | Gemini | Classic session JSON, `.project_root`, Antigravity transcripts, and `history.jsonl` |
 
-Coding history is namespaced by device. ChatGPT snapshots use the shared
-`chatgpt/<account>/<conversation-id>/<SHA-256 snapshot hash>.json` area instead:
+Coding history is namespaced by device. ChatGPT keeps one latest complete file
+per account/conversation in `chatgpt/<account>/<conversation-id>.json` instead.
+The browser receiver writes there directly when `[sync].path` is configured.
+`buddy sync` migrates local captures and legacy hash/device archives into these
+files, removing redundant JSON copies only after a successful save. Provider
+`update_time` orders versions; `captured_at` breaks ties. Older versions cannot
+replace newer ones through buddy on the same machine. External cloud clients
+can still introduce conflicts between independently writing devices; use one
+writing device when strict ordering is required.
+
+The archive layout is:
 
 ```text
 <sync.path>/
+|-- chatgpt/<account>/<conversation-id>.json
 `-- devices/
     |-- work-laptop/
     |   |-- .buddy-sync-manifest.json
@@ -81,7 +91,7 @@ sequenceDiagram
     actor User
     participant Buddy as buddy CLI
     participant Local as Current device HOME
-    participant Archive as Device archive
+    participant Archive as Shared archive
     participant Provider as External sync provider
     participant Collect as Weekly report collector
     participant LLM as AI CLI / API
@@ -90,15 +100,15 @@ sequenceDiagram
     Buddy->>Local: Scan supported raw history files
     Buddy->>Archive: Read the device manifest
     Buddy->>Local: Compute content digests
-    Buddy->>Archive: Atomically create or update changed files
+    Buddy->>Archive: Update coding files; consolidate latest ChatGPT conversations
     Buddy->>Archive: Atomically update the manifest
     Archive-->>Provider: External product replicates the folder
     Buddy-->>User: Print created / updated / skipped / failed
 
     Note over Buddy: With [sync] configured, wr run performs sync first
     User->>Buddy: buddy wr run
-    Buddy->>Collect: Read current HOME + devices/*/home
-    Collect->>Collect: Select latest ChatGPT snapshots; deduplicate coding messages
+    Buddy->>Collect: Read HOME, device archives, and shared ChatGPT files
+    Collect->>Collect: Read latest ChatGPT conversations; deduplicate coding messages
     Collect-->>Buddy: Create daily Markdown for the date range
     Buddy->>LLM: Submit the weekly-report prompt
     LLM-->>Buddy: Return the weekly report

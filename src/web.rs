@@ -50,6 +50,10 @@ impl Snapshot {
     pub fn revision(&self) -> f64 {
         self.conversation["update_time"].as_f64().unwrap_or(0.0)
     }
+    pub fn newer_than(&self, other: &Self) -> bool {
+        self.revision() > other.revision()
+            || (self.revision() == other.revision() && self.captured_at > other.captured_at)
+    }
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.schema_version != 1
             || self.account.len() != 64
@@ -95,7 +99,15 @@ fn private_dir(home: &Path, relative: &Path) -> anyhow::Result<PathBuf> {
                     use std::os::unix::fs::DirBuilderExt;
                     builder.mode(0o700);
                 }
-                builder.create(&path)?;
+                if let Err(error) = builder.create(&path) {
+                    if error.kind() != std::io::ErrorKind::AlreadyExists {
+                        return Err(error.into());
+                    }
+                    let meta = std::fs::symlink_metadata(&path)?;
+                    if !meta.is_dir() || meta.file_type().is_symlink() {
+                        bail!("invalid storage directory: {}", path.display());
+                    }
+                }
             }
             Err(e) => return Err(e.into()),
         }
@@ -142,12 +154,136 @@ pub fn pairing_token(home: &Path) -> anyhow::Result<String> {
 }
 
 pub fn save_snapshot(home: &Path, snapshot: &Snapshot) -> anyhow::Result<&'static str> {
-    use std::io::Write;
     snapshot.validate()?;
-    let dir = private_dir(
-        home,
-        &Path::new(".local/share/buddy/web/chatgpt").join(&snapshot.account),
-    )?;
+    let root = private_dir(home, Path::new(".local/share/buddy/web/chatgpt"))?;
+    let dir = private_dir(&root, Path::new(&snapshot.account))?;
+    let _lock = account_lock(&dir)?;
+    replace_latest(&dir, snapshot)
+}
+
+/// Save one canonical conversation, merging and removing legacy hash snapshots first.
+pub fn save_shared_snapshot(archive: &Path, snapshot: &Snapshot) -> anyhow::Result<&'static str> {
+    snapshot.validate()?;
+    std::fs::create_dir_all(archive)?;
+    let root = private_dir(archive, Path::new("chatgpt"))?;
+    let dir = private_dir(&root, Path::new(&snapshot.account))?;
+    let _lock = account_lock(&dir)?;
+    let legacy = dir.join(snapshot.id());
+    let mut latest = std::borrow::Cow::Borrowed(snapshot);
+    let mut obsolete = Vec::new();
+    match std::fs::symlink_metadata(&legacy) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+            for entry in std::fs::read_dir(&legacy)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().is_none_or(|ext| ext != "json") {
+                    continue;
+                }
+                let old = read_snapshot(&path)?;
+                if old.account != snapshot.account || old.id() != snapshot.id() {
+                    bail!(
+                        "legacy snapshot identity does not match its path: {}",
+                        path.display()
+                    );
+                }
+                if old.newer_than(&latest) {
+                    latest = std::borrow::Cow::Owned(old);
+                }
+                obsolete.push(path);
+            }
+        }
+        Ok(_) => bail!("invalid legacy snapshot directory: {}", legacy.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) => return Err(e.into()),
+    }
+    let result = replace_latest(&dir, &latest)?;
+    // Only discard older copies after the canonical file has been safely published.
+    for path in obsolete {
+        std::fs::remove_file(path)?;
+    }
+    if legacy.is_dir() {
+        match std::fs::remove_dir(&legacy) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => (),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(result)
+}
+
+/// Consume a legacy copy only after its content or a newer revision is safely stored.
+pub(crate) fn move_snapshot_to_shared(
+    source: &Path,
+    archive: &Path,
+) -> anyhow::Result<&'static str> {
+    let shared = archive.join("chatgpt");
+    let _source_lock = if source.starts_with(&shared) {
+        None
+    } else {
+        Some(account_lock(
+            source.parent().context("snapshot has no parent")?,
+        )?)
+    };
+    let snapshot = match read_snapshot(source) {
+        Ok(snapshot) => snapshot,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok("skipped");
+        }
+        Err(error) => return Err(error),
+    };
+    let destination = shared
+        .join(&snapshot.account)
+        .join(format!("{}.json", snapshot.id()));
+    if source == destination {
+        return Ok("skipped");
+    }
+    let result = save_shared_snapshot(archive, &snapshot)?;
+    match std::fs::remove_file(source) {
+        Ok(()) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) => return Err(e.into()),
+    }
+    Ok(result)
+}
+
+pub(crate) fn read_snapshot(path: &Path) -> anyhow::Result<Snapshot> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        bail!("invalid snapshot file: {}", path.display());
+    }
+    let snapshot: Snapshot =
+        serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(path)?))?;
+    snapshot.validate()?;
+    Ok(snapshot)
+}
+
+// Keep the lock file in place: removing it would let concurrent writers lock different inodes.
+fn account_lock(dir: &Path) -> anyhow::Result<std::fs::File> {
+    let path = dir.join(".buddy-chatgpt.lock");
+    let file = match private_file(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let meta = std::fs::symlink_metadata(&path)?;
+            if !meta.is_file() || meta.file_type().is_symlink() {
+                bail!("invalid snapshot lock");
+            }
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)?
+        }
+        Err(e) => return Err(e.into()),
+    };
+    file.lock()?;
+    Ok(file)
+}
+
+fn replace_latest(dir: &Path, snapshot: &Snapshot) -> anyhow::Result<&'static str> {
+    use std::io::Write;
     let path = dir.join(format!("{}.json", snapshot.id()));
     let mut existed = false;
     match std::fs::symlink_metadata(&path) {
@@ -156,10 +292,8 @@ pub fn save_snapshot(home: &Path, snapshot: &Snapshot) -> anyhow::Result<&'stati
                 bail!("invalid snapshot destination");
             }
             existed = true;
-            let old: Snapshot = serde_json::from_slice(&std::fs::read(&path)?)?;
-            if old.revision() > snapshot.revision()
-                || (old.revision() == snapshot.revision() && old.captured_at > snapshot.captured_at)
-            {
+            let old = read_snapshot(&path)?;
+            if old.newer_than(snapshot) {
                 return Ok("stale");
             }
             if old.conversation == snapshot.conversation {
@@ -187,6 +321,7 @@ pub fn save_snapshot(home: &Path, snapshot: &Snapshot) -> anyhow::Result<&'stati
 #[derive(Clone)]
 struct Receiver {
     home: PathBuf,
+    archive: Option<PathBuf>,
     token: String,
     writes: Arc<Mutex<()>>,
     host: String,
@@ -229,8 +364,11 @@ async fn ingest(
             "receiver lock failed".into(),
         )
     })?;
-    let status = save_snapshot(&receiver.home, &snapshot)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let status = match &receiver.archive {
+        Some(archive) => save_shared_snapshot(archive, &snapshot),
+        None => save_snapshot(&receiver.home, &snapshot),
+    }
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(json!({"status": status})))
 }
 
@@ -241,13 +379,23 @@ async fn health(
     if !authorized(&headers, &receiver) {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    Ok(Json(json!({"app": "buddy", "schema_version": 1})))
+    use sha2::{Digest, Sha256};
+    let root = receiver
+        .archive
+        .as_ref()
+        .map(|p| p.join("chatgpt"))
+        .unwrap_or_else(|| history_root(&receiver.home));
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    let storage_id = format!("{:x}", Sha256::digest(root.to_string_lossy().as_bytes()));
+    Ok(Json(
+        json!({"app": "buddy", "schema_version": 1, "storage_id": storage_id}),
+    ))
 }
 
 pub fn run(
     command: WebCommand,
     default_home: &Path,
-    config: &crate::config::WebConfig,
+    config: &crate::config::Config,
 ) -> anyhow::Result<()> {
     match command {
         WebCommand::Pair { home } => println!(
@@ -256,7 +404,14 @@ pub fn run(
         ),
         WebCommand::Status { port, home } => {
             let home = home.as_deref().unwrap_or(default_home);
-            let count = walkdir::WalkDir::new(history_root(home))
+            let root = config
+                .sync
+                .path
+                .as_ref()
+                .map(|p| p.join("chatgpt"))
+                .unwrap_or_else(|| history_root(home));
+            println!("ChatGPT storage: {}", root.display());
+            let count = walkdir::WalkDir::new(root)
                 .into_iter()
                 .filter_map(Result::ok)
                 .filter(|e| {
@@ -285,11 +440,27 @@ pub fn run(
             home,
             max_body_mib,
         } => {
-            let max_body = max_body_bytes(max_body_mib, config)?;
+            let max_body = max_body_bytes(max_body_mib, &config.web)?;
             let home = home.unwrap_or_else(|| default_home.to_path_buf());
             let token = pairing_token(&home)?;
+            if let Some(archive) = &config.sync.path {
+                crate::sync::validate_target(&home, archive)?;
+                let outcome = crate::sync::migrate_chatgpt(&home, archive);
+                if !outcome.failures.is_empty() {
+                    bail!("ChatGPT migration failed: {}", outcome.failures.join("; "));
+                }
+            }
+            let root = match &config.sync.path {
+                Some(archive) => {
+                    std::fs::create_dir_all(archive)?;
+                    private_dir(archive, Path::new("chatgpt"))?
+                }
+                None => private_dir(&home, Path::new(".local/share/buddy/web/chatgpt"))?,
+            };
+            eprintln!("ChatGPT storage: {}", root.display());
             let receiver = Receiver {
                 home,
+                archive: config.sync.path.clone(),
                 token,
                 writes: Arc::new(Mutex::new(())),
                 host: format!("127.0.0.1:{port}"),

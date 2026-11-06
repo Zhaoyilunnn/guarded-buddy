@@ -2,7 +2,10 @@
 
 This sequence describes the current `buddy wr run` implementation. Collection runs
 in the foreground; summarization and optional email run in a separate worker.
-ChatGPT snapshots must first be received through [browser sync](chatgpt-sync.md).
+ChatGPT conversations must first be received through [browser sync](chatgpt-sync.md).
+With `[sync].path` configured, the receiver writes directly to one latest JSON file
+per conversation in the shared `chatgpt` directory. `wr run` migrates any remaining
+local captures and legacy version files before collection; it does not fetch ChatGPT.
 The output root is configurable; `out/<range>` below denotes its default layout.
 
 ```mermaid
@@ -18,14 +21,14 @@ sequenceDiagram
     User->>CLI: Run with options
     CLI->>CLI: Load config and resolve date range and backend
     opt Sync configured and --no-sync absent
-        CLI->>Sources: Archive coding histories by device and ChatGPT snapshots in shared storage
+        CLI->>Sources: Archive coding histories; consolidate latest ChatGPT files in shared storage
         Sources-->>CLI: Sync result
         Note over CLI,Sources: Reported sync failure stops the foreground command
     end
-    CLI->>Sources: Read current HOME and configured devices/*/home
+    CLI->>Sources: Read HOME, configured device archives, and shared ChatGPT files
     Note over CLI,Sources: Codex scans all date directories and skips files with mtime before the first local day
     Sources-->>CLI: Parsed sessions and source warnings
-    CLI->>CLI: Select latest ChatGPT snapshots and current branches; merge coding sessions
+    CLI->>CLI: Read latest ChatGPT conversations and current branches; merge coding sessions
     CLI->>CLI: Filter message dates and group by local day
     CLI->>Files: Write daily Markdown and index.md
     CLI-->>User: Collection summary and warnings

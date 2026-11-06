@@ -32,7 +32,7 @@ For read-only environment checks, run `buddy doctor`. See
 
 Execution sequence and current limitations: [docs/wr-run.md](docs/wr-run.md).
 
-Collects conversation history from Codex / Cursor / Claude Code / Gemini and locally saved ChatGPT web snapshots under `$HOME`, writes per-day Markdown, then summarizes in the background to `report.md` (optional mutt email).
+Collects conversation history from Codex / Cursor / Claude Code / Gemini and the latest saved ChatGPT web conversations from HOME or the shared archive, writes per-day Markdown, then summarizes in the background to `report.md` (optional mutt email).
 
 Codex scans all session date directories in local and configured archive homes,
 skipping only JSONL files modified before the first requested local day (no upper
@@ -86,8 +86,10 @@ Run `buddy web serve`, copy the token from `buddy web pair`, and load
 The extension can save the current ChatGPT conversation, sync history, and sync
 automatically every 15 minutes using your existing browser login.
 
-Saved text enters `wr` and the shared, device-independent ChatGPT archive. Weekly reports use the
-latest snapshot and current conversation branch; web chats do not enter signoff.
+With `[sync].path` configured, the receiver saves directly to
+`<sync.path>/chatgpt/<account>/<conversation-id>.json`; otherwise it uses local HOME.
+Each conversation keeps only its latest complete content. Weekly reports read the
+current conversation branch; web chats do not enter signoff.
 Setup, recovery, permissions, and limitations: [ChatGPT sync](docs/chatgpt-sync.md).
 
 ### `signoff` - end of day

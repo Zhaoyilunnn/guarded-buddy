@@ -46,7 +46,8 @@ async function sync({ currentId = null, full = false, resume = false } = {}) {
   try {
     const config = await settings();
     await status({ running: true, error: null, saved, skipped });
-    await receiver(config, "/health");
+    const health = await receiver(config, "/health");
+    const storageId = health.storage_id || "legacy";
     const auth = await login();
     // A pending payload survives an offline receiver or worker suspension.
     const { pending } = await chrome.storage.local.get("pending");
@@ -55,7 +56,7 @@ async function sync({ currentId = null, full = false, resume = false } = {}) {
       await receiver(config, "/v1/chatgpt", pending);
       await chrome.storage.local.remove("pending");
     }
-    const progressKey = `progress:${auth.account}`;
+    const progressKey = `progress:${auth.account}:${storageId}`;
     let { [progressKey]: progress } = await chrome.storage.local.get(progressKey);
     if (!resume || !progress) progress = { offset: 0, index: 0, items: null, full, currentId };
     full = progress.full;
@@ -63,7 +64,7 @@ async function sync({ currentId = null, full = false, resume = false } = {}) {
     await chrome.storage.local.set({ [progressKey]: progress, activeProgress: progressKey });
     const tokenDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(config.token));
     const receiverId = [...new Uint8Array(tokenDigest)].map(b => b.toString(16).padStart(2, "0")).join("");
-    const checkpointKey = `checkpoints:${auth.account}:${config.port}:${receiverId}`;
+    const checkpointKey = `checkpoints:${auth.account}:${config.port}:${receiverId}:${storageId}`;
     const stored = await chrome.storage.local.get(checkpointKey);
     const checkpoints = stored[checkpointKey] || {};
     while (true) {
@@ -84,11 +85,12 @@ async function sync({ currentId = null, full = false, resume = false } = {}) {
           const body = await conversation(auth.token, item.id);
           const payload = { schema_version: 1, account: auth.account, captured_at: new Date().toISOString(), conversation: body };
           await chrome.storage.local.set({ pending: payload });
-          await receiver(config, "/v1/chatgpt", payload);
+          const acknowledgement = await receiver(config, "/v1/chatgpt", payload);
           checkpoints[item.id] = revision(body.update_time);
           await chrome.storage.local.set({ [checkpointKey]: checkpoints });
           await chrome.storage.local.remove("pending");
-          saved++;
+          if (acknowledgement.status === "created" || acknowledgement.status === "updated") saved++;
+          else skipped++;
         }
         await chrome.storage.local.set({ [progressKey]: { ...progress, index: progress.index + 1 } });
         await status({ saved, skipped });

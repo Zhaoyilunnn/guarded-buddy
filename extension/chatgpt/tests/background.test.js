@@ -12,6 +12,8 @@ test("sync checkpoints, current saves, offline queue and worker restart", async 
   let failIngest = false;
   let ingestStatus = 200;
   let updated = 100;
+  let storageId = "local";
+  let acknowledgement = "created";
   globalThis.chrome = {
     storage: { local: {
       async get(keys) {
@@ -26,7 +28,7 @@ test("sync checkpoints, current saves, offline queue and worker restart", async 
   };
   globalThis.fetch = async (url, options = {}) => {
     const reply = value => ({ ok: true, status: 200, json: async () => value });
-    if (url.endsWith("/health")) return reply({ app: "buddy", schema_version: 1 });
+    if (url.endsWith("/health")) return reply({ app: "buddy", schema_version: 1, storage_id: storageId });
     if (url.endsWith("/api/auth/session")) return reply({ accessToken: "provider-secret", user: { id: "user-1" } });
     if (url.includes("/conversations?")) return reply({ total: 1, items: [{ id: "chat-1", update_time: updated }] });
     if (url.endsWith("/conversation/chat-1")) {
@@ -41,7 +43,7 @@ test("sync checkpoints, current saves, offline queue and worker restart", async 
       if (failIngest) throw new TypeError("Failed to fetch");
       if (ingestStatus !== 200) return { ok: false, status: ingestStatus };
       writes++;
-      return reply({ status: "created" });
+      return reply({ status: acknowledgement });
     }
     throw new Error(`Unexpected URL: ${url}`);
   };
@@ -95,4 +97,14 @@ test("sync checkpoints, current saves, offline queue and worker restart", async 
   await send({ type: "sync" });
   assert.equal(data.status.error, null);
   assert.equal(data.pending, undefined);
+  const beforeSwitch = details;
+  storageId = "shared";
+  await send({ type: "sync" });
+  assert.equal(details, beforeSwitch + 1, "a new destination must not reuse old checkpoints");
+  await send({ type: "sync" });
+  assert.equal(details, beforeSwitch + 1);
+  acknowledgement = "stale";
+  await send({ type: "sync", full: true });
+  assert.equal(data.status.saved, 0);
+  assert.equal(data.status.skipped, 1);
 });
