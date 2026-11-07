@@ -91,6 +91,8 @@ With `[sync].path` configured, the receiver saves directly to
 Each conversation keeps only its latest complete content. Weekly reports read the
 current conversation branch; web chats do not enter signoff.
 Setup, recovery, permissions, and limitations: [ChatGPT sync](docs/chatgpt-sync.md).
+For startup on Linux or each WSL launch, see the
+[systemd service setup](docs/chatgpt-sync.md#automatic-startup-with-systemd-linux-and-wsl).
 
 ### `signoff` - end of day
 

@@ -7,7 +7,9 @@ The browser uses its existing ChatGPT login. No OpenAI API key is required.
 ## Setup
 
 1. Run `buddy web serve` on the same machine as the browser. Keep this foreground
-   process running; Ctrl-C stops it. The default address is `http://127.0.0.1:18242`.
+   process running; Ctrl-C stops it. For automatic startup, use the
+   [systemd service](#automatic-startup-with-systemd-linux-and-wsl) below.
+   The default address is `http://127.0.0.1:18242`.
 2. Run `buddy web pair` in another terminal and copy its pairing token.
 3. Open `chrome://extensions` (or the equivalent in Edge/Brave), enable Developer
    mode, select **Load unpacked**, and choose this repository's `extension/chatgpt`
@@ -47,6 +49,120 @@ loaded from the current user's HOME, even when `--home` selects another data HOM
 Restart the receiver after changing the configuration. Its startup message shows
 the effective limit. This setting limits HTTP uploads; local snapshot collection
 reads saved snapshots independently of this upload limit.
+
+## Automatic startup with systemd (Linux and WSL)
+
+A system service starts the receiver when Linux boots and restarts it after a
+failure. It runs as your regular Linux user and uses the same configuration,
+storage, and pairing token as an interactive `buddy web serve` process.
+
+### Enable systemd in WSL
+
+On WSL, first check whether systemd is already running:
+
+```sh
+ps -p 1 -o comm=
+```
+
+If the output is `systemd`, continue to service installation. Otherwise, edit
+`/etc/wsl.conf` with `sudo` and add or update the following section, preserving
+any existing settings:
+
+```ini
+[boot]
+systemd=true
+```
+
+In **Windows PowerShell**, run the following command. It stops all running WSL
+instances, so save your work first:
+
+```powershell
+wsl --shutdown
+```
+
+Reopen your WSL distribution and check PID 1 again. If systemd is unavailable,
+run `wsl --update` in PowerShell and follow Microsoft's
+[WSL systemd setup guide](https://learn.microsoft.com/en-us/windows/wsl/systemd).
+
+### Install the system service
+
+Stop any foreground `buddy web serve` process with Ctrl-C to free port 18242.
+Find your Linux username, home directory, and installed binary:
+
+```sh
+id -un
+printf '%s\n' "$HOME"
+command -v buddy
+```
+
+Create the service file:
+
+```sh
+sudo nano /etc/systemd/system/buddy-web.service
+```
+
+Paste the following unit, replacing `YOUR_USER`, `/home/YOUR_USER`, and the binary
+path with the values from above. Use absolute paths; systemd does not expand `~`
+or load your shell profile.
+
+```ini
+[Unit]
+Description=Buddy ChatGPT Web Receiver
+RequiresMountsFor=/home/YOUR_USER
+
+[Service]
+Type=simple
+User=YOUR_USER
+Environment=HOME=/home/YOUR_USER
+WorkingDirectory=/home/YOUR_USER
+ExecStart=/home/YOUR_USER/.cargo/bin/buddy web serve
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`HOME` selects `~/.config/buddy/config.toml` and the existing pairing token.
+`KillSignal=SIGINT` uses the receiver's graceful shutdown handler. If `[sync].path`
+is on another mount, append its absolute path to `RequiresMountsFor=` so systemd
+orders startup after that mount. The service user needs write access to the
+configured storage directory.
+
+Load the unit and enable startup:
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now buddy-web.service
+systemctl status buddy-web.service
+buddy web status
+```
+
+Run `buddy web status` as the same Linux user configured in the unit. The receiver
+continues to listen on `127.0.0.1:18242`. To use another port, add `--port PORT` to
+`ExecStart`, pass the same port to `buddy web status`, and update the extension.
+
+### Manage the receiver
+
+```sh
+sudo journalctl -u buddy-web.service -f
+sudo systemctl restart buddy-web.service
+sudo systemctl stop buddy-web.service
+sudo systemctl disable --now buddy-web.service
+```
+
+Restart the service after changing buddy configuration or reinstalling its binary.
+After editing the service unit, run `sudo systemctl daemon-reload` before
+restarting it.
+
+On WSL, the enabled service starts whenever that distribution starts, including
+when you reopen it after `wsl --shutdown`. Opening another terminal while the
+distribution is already running uses the existing service. Systemd services
+[do not keep WSL running](https://learn.microsoft.com/en-us/windows/wsl/systemd);
+the receiver runs while the distribution is active. This setup does not launch
+WSL automatically when Windows starts.
 
 ## Storage and report behavior
 
