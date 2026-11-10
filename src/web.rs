@@ -342,44 +342,82 @@ fn replace_latest(dir: &Path, snapshot: &Snapshot) -> anyhow::Result<&'static st
     Ok(if existed { "updated" } else { "created" })
 }
 
-// One worker bounds conversion concurrency; JSON files are the durable work queue.
+// JSON is durable; the worker scans once for recovery, then sleeps until notified.
 struct MarkdownWorker {
-    stop: std::sync::mpsc::SyncSender<()>,
+    jobs: std::sync::mpsc::Sender<Option<PathBuf>>,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+fn markdown_needed(path: &Path) -> bool {
+    let Ok(source) = std::fs::metadata(path).and_then(|m| m.modified()) else {
+        return false;
+    };
+    let destination = path.with_extension("md");
+    let Ok(meta) = std::fs::symlink_metadata(destination) else {
+        return true;
+    };
+    !meta.is_file()
+        || meta.file_type().is_symlink()
+        || meta.modified().map_or(true, |modified| modified < source)
 }
 
 impl MarkdownWorker {
     fn start(root: PathBuf) -> Self {
-        let (stop, receive) = std::sync::mpsc::sync_channel(1);
+        let (jobs, receive) = std::sync::mpsc::channel::<Option<PathBuf>>();
         let thread = std::thread::spawn(move || {
-            loop {
-                for entry in walkdir::WalkDir::new(&root).follow_links(false) {
-                    let entry = match entry {
-                        Ok(entry) => entry,
-                        Err(error) => {
-                            eprintln!("Markdown scan failed: {error}");
-                            continue;
-                        }
-                    };
-                    if entry.file_type().is_file()
-                        && entry.path().extension().is_some_and(|x| x == "json")
+            let mut pending = std::collections::HashSet::new();
+            for entry in walkdir::WalkDir::new(&root).follow_links(false) {
+                match entry {
+                    Ok(entry)
+                        if entry.file_type().is_file()
+                            && entry.path().extension().is_some_and(|x| x == "json")
+                            && markdown_needed(entry.path()) =>
                     {
-                        if let Err(error) = export_markdown(&root, entry.path()) {
-                            eprintln!(
-                                "Markdown conversion failed for {}: {error:#}",
-                                entry.path().display()
-                            );
-                        }
+                        pending.insert(entry.into_path());
+                    }
+                    Err(error) => eprintln!("Markdown scan failed: {error}"),
+                    _ => (),
+                }
+            }
+            loop {
+                let mut failed = std::collections::HashSet::new();
+                for path in pending.drain() {
+                    if let Err(error) = export_markdown(&root, &path) {
+                        eprintln!(
+                            "Markdown conversion failed for {}: {error:#}",
+                            path.display()
+                        );
+                        failed.insert(path);
                     }
                 }
-                match receive.recv_timeout(std::time::Duration::from_secs(2)) {
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (),
+                pending = failed;
+                let job = if pending.is_empty() {
+                    receive
+                        .recv()
+                        .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)
+                } else {
+                    receive.recv_timeout(std::time::Duration::from_secs(30))
+                };
+                match job {
+                    Ok(Some(path)) => {
+                        pending.insert(path);
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                     _ => break,
+                }
+                // Coalesce queued updates before reading the latest saved snapshots.
+                for job in receive.try_iter() {
+                    match job {
+                        Some(path) => {
+                            pending.insert(path);
+                        }
+                        None => return,
+                    }
                 }
             }
         });
         Self {
-            stop,
+            jobs,
             thread: Some(thread),
         }
     }
@@ -387,7 +425,7 @@ impl MarkdownWorker {
 
 impl Drop for MarkdownWorker {
     fn drop(&mut self) {
-        let _ = self.stop.send(());
+        let _ = self.jobs.send(None);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -460,6 +498,7 @@ struct Receiver {
     token: String,
     writes: Arc<Mutex<()>>,
     host: String,
+    markdown: std::sync::mpsc::Sender<Option<PathBuf>>,
 }
 
 fn authorized(headers: &HeaderMap, receiver: &Receiver) -> bool {
@@ -504,6 +543,23 @@ async fn ingest(
         None => save_snapshot(&receiver.home, &snapshot),
     }
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if status != "stale" {
+        let root = receiver
+            .archive
+            .as_ref()
+            .map(|p| p.join("chatgpt"))
+            .unwrap_or_else(|| history_root(&receiver.home));
+        let path = root
+            .join(&snapshot.account)
+            .join(
+                snapshot_date(&snapshot)
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+            )
+            .join(format!("{}.json", snapshot.id()));
+        if receiver.markdown.send(Some(path)).is_err() {
+            eprintln!("Markdown worker unavailable; restart the receiver to backfill saved JSON");
+        }
+    }
     Ok(Json(json!({"status": status})))
 }
 
@@ -600,6 +656,7 @@ pub fn run(
                 token,
                 writes: Arc::new(Mutex::new(())),
                 host: format!("127.0.0.1:{port}"),
+                markdown: _markdown_worker.jobs.clone(),
             };
             tokio::runtime::Runtime::new()?.block_on(async {
                 let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
@@ -658,6 +715,44 @@ mod tests {
         assert!(text.contains("Latest answer"));
         assert!(!text.contains("First answer"));
         assert!(text.contains("https://chatgpt.com/c/test"));
+    }
+
+    #[test]
+    fn worker_skips_current_files_and_processes_notifications() {
+        let root = tempfile::tempdir().unwrap();
+        let account = root.path().join("a".repeat(64));
+        std::fs::create_dir(&account).unwrap();
+        let path = account.join("test.json");
+        let snapshot = Snapshot {
+            schema_version: 1,
+            account: "a".repeat(64),
+            captured_at: chrono::Utc::now(),
+            conversation: json!({"conversation_id": "test", "title": "Queued", "update_time": 1700000000,
+                "create_time": 1700000000, "current_node": "a", "mapping": {
+                "a": {"parent": null, "message": {"author": {"role": "user"},
+                "create_time": 1700000000, "content": {"parts": ["Hello"]}}}}}),
+        };
+        std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        assert!(markdown_needed(&path));
+        {
+            let _worker = MarkdownWorker::start(root.path().to_path_buf());
+        }
+        assert!(!markdown_needed(&path));
+        let worker = MarkdownWorker::start(root.path().to_path_buf());
+        // A new file after startup must be converted through an explicit notification.
+        let queued = account.join("queued.json");
+        std::fs::write(&queued, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        worker.jobs.send(Some(queued.clone())).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !queued.with_extension("md").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            std::fs::read_to_string(queued.with_extension("md"))
+                .unwrap()
+                .contains("Hello")
+        );
     }
 
     #[test]

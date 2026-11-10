@@ -176,10 +176,11 @@ conversation response, schema version (`1`), and local capture time. With
 
 Snapshots are organized by the conversation update date in the receiver’s local timezone. Updating a conversation across dates moves its latest snapshot to the new date directory. Existing flat and hash-based snapshots are migrated during archive synchronization. Weekly reports continue to filter individual message timestamps.
 
-While `buddy web serve` runs, one background worker scans saved JSON every two
-seconds and writes a same-name `.md` beside each snapshot. Existing JSON is also
-backfilled on startup. JSON delivery does not wait for Markdown conversion.
-The worker retries failed conversions on later scans and logs errors to stderr;
+While `buddy web serve` runs, one background worker writes a same-name `.md` beside each snapshot. On startup,
+it scans file timestamps once to backfill missing or older Markdown. After that,
+sync requests enqueue individual conversations; queued paths are deduplicated,
+and the worker sleeps when idle. JSON delivery does not wait for Markdown conversion.
+The worker retries failed conversions after a 30-second idle timeout (or when new jobs arrive) and logs errors to stderr;
 restarting the server resumes from the saved JSON. Markdown includes the title,
 original link, creation/update timestamps, and visible messages on the current
 branch. Non-text attachments are not reconstructed. Cross-date updates remove
