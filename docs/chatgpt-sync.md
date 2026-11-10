@@ -176,6 +176,17 @@ conversation response, schema version (`1`), and local capture time. With
 
 Snapshots are organized by the conversation update date in the receiver’s local timezone. Updating a conversation across dates moves its latest snapshot to the new date directory. Existing flat and hash-based snapshots are migrated during archive synchronization. Weekly reports continue to filter individual message timestamps.
 
+While `buddy web serve` runs, one background worker scans saved JSON every two
+seconds and writes a same-name `.md` beside each snapshot. Existing JSON is also
+backfilled on startup. JSON delivery does not wait for Markdown conversion.
+The worker retries failed conversions on later scans and logs errors to stderr;
+restarting the server resumes from the saved JSON. Markdown includes the title,
+original link, creation/update timestamps, and visible messages on the current
+branch. Non-text attachments are not reconstructed. Cross-date updates remove
+the old Markdown and generate it beside the latest JSON. JSON remains the source
+for reports. The sync response confirms JSON persistence; it does not indicate
+Markdown completion. Conversion currently has no plugin progress indicator.
+
 No separate `buddy sync` is needed to publish browser captures to that directory.
 Without `[sync].path`, the receiver writes to
 `~/.local/share/buddy/web/chatgpt/<account>/YYYY/MM/DD/<conversation-id>.json`. The pairing

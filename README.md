@@ -87,7 +87,7 @@ The extension can save the current ChatGPT conversation, sync history, and sync
 automatically every 15 minutes using your existing browser login.
 
 With `[sync].path` configured, the receiver saves directly to
-`<sync.path>/chatgpt/<account>/YYYY/MM/DD/<conversation-id>.json`; otherwise it uses local HOME.
+`<sync.path>/chatgpt/<account>/YYYY/MM/DD/<conversation-id>.json`; otherwise it uses local HOME. A background worker generates same-name Markdown files beside the JSON while the receiver runs.
 Each conversation keeps only its latest complete content. Weekly reports read the
 current conversation branch; web chats do not enter signoff.
 Setup, recovery, permissions, and limitations: [ChatGPT sync](docs/chatgpt-sync.md).

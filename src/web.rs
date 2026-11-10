@@ -211,7 +211,13 @@ fn save_dated(dir: &Path, snapshot: &Snapshot) -> anyhow::Result<&'static str> {
     let result = replace_latest(&dated, &latest)?;
     for path in obsolete {
         if path != destination {
+            let markdown = path.with_extension("md");
             std::fs::remove_file(path)?;
+            match std::fs::remove_file(markdown) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error.into()),
+            }
         }
     }
     if legacy.is_dir() {
@@ -334,6 +340,117 @@ fn replace_latest(dir: &Path, snapshot: &Snapshot) -> anyhow::Result<&'static st
     }
     result?;
     Ok(if existed { "updated" } else { "created" })
+}
+
+// One worker bounds conversion concurrency; JSON files are the durable work queue.
+struct MarkdownWorker {
+    stop: std::sync::mpsc::SyncSender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl MarkdownWorker {
+    fn start(root: PathBuf) -> Self {
+        let (stop, receive) = std::sync::mpsc::sync_channel(1);
+        let thread = std::thread::spawn(move || {
+            loop {
+                for entry in walkdir::WalkDir::new(&root).follow_links(false) {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            eprintln!("Markdown scan failed: {error}");
+                            continue;
+                        }
+                    };
+                    if entry.file_type().is_file()
+                        && entry.path().extension().is_some_and(|x| x == "json")
+                    {
+                        if let Err(error) = export_markdown(&root, entry.path()) {
+                            eprintln!(
+                                "Markdown conversion failed for {}: {error:#}",
+                                entry.path().display()
+                            );
+                        }
+                    }
+                }
+                match receive.recv_timeout(std::time::Duration::from_secs(2)) {
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (),
+                    _ => break,
+                }
+            }
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for MarkdownWorker {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn export_markdown(root: &Path, path: &Path) -> anyhow::Result<()> {
+    let snapshot = match read_snapshot(path) {
+        Ok(snapshot) => snapshot,
+        Err(_error) if !path.exists() => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let account = private_dir(root, Path::new(&snapshot.account))?;
+    if !path.starts_with(&account) {
+        bail!("snapshot account does not match its path");
+    }
+    let _lock = account_lock(&account)?;
+    // Re-read under the writer lock so a delayed conversion cannot publish an old revision.
+    if !path.exists() {
+        return Ok(());
+    }
+    let snapshot = read_snapshot(path)?;
+    let session = crate::sources::chatgpt::parse(&snapshot).map_err(anyhow::Error::msg)?;
+    let title = snapshot.conversation["title"]
+        .as_str()
+        .unwrap_or("Untitled")
+        .replace(['\n', '\r'], " ");
+    let mut markdown = format!(
+        "# {title}\n\nhttps://chatgpt.com/c/{}\n\nCreated: {}\nUpdated: {}\n",
+        snapshot.id(),
+        snapshot.conversation["create_time"],
+        snapshot.conversation["update_time"]
+    );
+    for message in session.messages {
+        markdown.push_str(&format!(
+            "\n## {:?} · {}\n\n{}\n",
+            message.role,
+            message.timestamp.to_rfc3339(),
+            message.text().unwrap_or("")
+        ));
+    }
+    let destination = path.with_extension("md");
+    if std::fs::symlink_metadata(&destination)
+        .is_ok_and(|m| !m.is_file() || m.file_type().is_symlink())
+    {
+        bail!("invalid Markdown destination");
+    }
+    if std::fs::read_to_string(&destination).ok().as_deref() == Some(&markdown) {
+        return Ok(());
+    }
+    let temp = path.with_extension(format!("{}.tmp", rand::random::<u64>()));
+    let result = (|| -> anyhow::Result<()> {
+        use std::io::Write;
+        let mut file = private_file(&temp)?;
+        file.write_all(markdown.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&temp, &destination)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
 }
 
 #[derive(Clone)]
@@ -476,6 +593,7 @@ pub fn run(
                 None => private_dir(&home, Path::new(".local/share/buddy/web/chatgpt"))?,
             };
             eprintln!("ChatGPT storage: {}", root.display());
+            let _markdown_worker = MarkdownWorker::start(root.clone());
             let receiver = Receiver {
                 home,
                 archive: config.sync.path.clone(),
@@ -499,6 +617,48 @@ pub fn run(
 mod tests {
     use super::*;
     use crate::config::WebConfig;
+
+    #[test]
+    fn markdown_backfill_tracks_latest_revision_and_date() {
+        let home = tempfile::tempdir().unwrap();
+        let mut snapshot = Snapshot {
+            schema_version: 1,
+            account: "a".repeat(64),
+            captured_at: chrono::Utc::now(),
+            conversation: json!({"conversation_id": "test", "title": "Example", "create_time": 1700000000,
+                "update_time": 1700000000, "current_node": "a", "mapping": {
+                    "a": {"parent": null, "message": {"author": {"role": "assistant"},
+                    "create_time": 1700000000, "content": {"parts": ["First answer"]}}}}}),
+        };
+        save_snapshot(home.path(), &snapshot).unwrap();
+        let root = history_root(home.path());
+        let old = root
+            .join(&snapshot.account)
+            .join(snapshot_date(&snapshot).unwrap())
+            .join("test.json");
+        export_markdown(&root, &old).unwrap();
+        assert!(
+            std::fs::read_to_string(old.with_extension("md"))
+                .unwrap()
+                .contains("First answer")
+        );
+        snapshot.conversation["update_time"] = json!(1700259200);
+        snapshot.conversation["mapping"]["a"]["message"]["content"]["parts"] =
+            json!(["Latest answer"]);
+        save_snapshot(home.path(), &snapshot).unwrap();
+        assert!(!old.with_extension("md").exists());
+        export_markdown(&root, &old).unwrap();
+        let new = root
+            .join(&snapshot.account)
+            .join(snapshot_date(&snapshot).unwrap())
+            .join("test.json");
+        export_markdown(&root, &new).unwrap();
+        export_markdown(&root, &new).unwrap();
+        let text = std::fs::read_to_string(new.with_extension("md")).unwrap();
+        assert!(text.contains("Latest answer"));
+        assert!(!text.contains("First answer"));
+        assert!(text.contains("https://chatgpt.com/c/test"));
+    }
 
     #[test]
     fn body_limit_uses_cli_then_config_then_default() {
