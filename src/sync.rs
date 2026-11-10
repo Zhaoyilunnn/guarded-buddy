@@ -145,7 +145,7 @@ pub fn migrate_chatgpt(home: &Path, archive: &Path) -> SyncOutcome {
     collect_matching(&shared, &mut files, |p| {
         extension(p, "json")
             && p.strip_prefix(&shared)
-                .is_ok_and(|p| p.components().count() > 2)
+                .is_ok_and(|p| p.components().count() != 5)
     });
     files.sort();
     files.dedup();

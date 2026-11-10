@@ -144,6 +144,7 @@ fn shared_conversations_keep_only_latest_and_migrate_device_copies() {
         .path()
         .join("chatgpt")
         .join(&new.account)
+        .join("1970/01/01")
         .join("conversation-1.json");
     let stored: Snapshot = serde_json::from_slice(&std::fs::read(&canonical).unwrap()).unwrap();
     assert_eq!(stored.revision(), 200.0);
@@ -195,6 +196,7 @@ fn shared_store_replaces_newer_content_and_migrates_hash_history() {
         .path()
         .join("chatgpt")
         .join(&first.account)
+        .join("1970/01/01")
         .join("conversation-1.json");
     let stored: Snapshot = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(stored.conversation, newest.conversation);
@@ -239,6 +241,7 @@ fn failed_migration_retains_original_and_concurrent_writes_keep_newest() {
     assert!(
         buddy::web::history_root(home.path())
             .join(&body.account)
+            .join("1970/01/01")
             .join("conversation-1.json")
             .is_file()
     );
@@ -264,6 +267,7 @@ fn failed_migration_retains_original_and_concurrent_writes_keep_newest() {
         .path()
         .join("chatgpt")
         .join(&body.account)
+        .join("1970/01/01")
         .join("conversation-1.json");
     let stored: Snapshot = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     assert_eq!(stored.revision(), 8.0);
@@ -520,6 +524,7 @@ fn receiver_and_cli_collect_enforce_auth_and_render_current_branch() {
     assert!(
         !buddy::web::history_root(home.path())
             .join(&payload.account)
+            .join("1970/01/01")
             .join("conversation-1.json")
             .exists()
     );
@@ -528,6 +533,7 @@ fn receiver_and_cli_collect_enforce_auth_and_render_current_branch() {
             .path()
             .join("chatgpt")
             .join(&payload.account)
+            .join("1970/01/01")
             .join("conversation-1.json")
             .is_file()
     );
@@ -584,4 +590,37 @@ fn signoff_does_not_ingest_web_conversations() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(!text.contains("Run dangerous action"));
+}
+
+#[test]
+fn update_date_moves_snapshot_and_stale_sync_keeps_latest_date() {
+    let archive = tempfile::tempdir().unwrap();
+    let old = snapshot(1700000000.0, "Old");
+    let new = snapshot(1700259200.0, "New");
+    buddy::web::save_shared_snapshot(archive.path(), &old).unwrap();
+    buddy::web::save_shared_snapshot(archive.path(), &new).unwrap();
+    buddy::web::save_shared_snapshot(archive.path(), &old).unwrap();
+    let files: Vec<_> = walkdir::WalkDir::new(archive.path())
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .collect();
+    assert_eq!(files.len(), 1);
+    let date = chrono::DateTime::from_timestamp(new.revision() as i64, 0)
+        .unwrap()
+        .with_timezone(&Local)
+        .format("%Y/%m/%d")
+        .to_string();
+    assert_eq!(
+        files[0].path(),
+        archive
+            .path()
+            .join("chatgpt")
+            .join(&new.account)
+            .join(date)
+            .join("conversation-1.json")
+    );
+    let stored: Snapshot =
+        serde_json::from_slice(&std::fs::read(files[0].path()).unwrap()).unwrap();
+    assert_eq!(stored.conversation, new.conversation);
 }

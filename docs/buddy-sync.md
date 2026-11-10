@@ -27,14 +27,14 @@ buddy does not copy the entire HOME directory. It copies only records supported 
 
 | Source | Synced content |
 | --- | --- |
-| ChatGPT web | Latest complete conversation at shared `chatgpt/<account>/<conversation-id>.json` (excludes the pairing token) |
+| ChatGPT web | Latest complete conversation at shared `chatgpt/<account>/YYYY/MM/DD/<conversation-id>.json` (excludes the pairing token) |
 | Codex | JSONL files under `.codex/sessions` |
 | Cursor | JSONL files under `agent-transcripts` in `.cursor/projects` |
 | Claude | JSONL files under `.claude/projects` |
 | Gemini | Classic session JSON, `.project_root`, Antigravity transcripts, and `history.jsonl` |
 
 Coding history is namespaced by device. ChatGPT keeps one latest complete file
-per account/conversation in `chatgpt/<account>/<conversation-id>.json` instead.
+per account/conversation in `chatgpt/<account>/YYYY/MM/DD/<conversation-id>.json` instead.
 The browser receiver writes there directly when `[sync].path` is configured.
 `buddy sync` migrates local captures and legacy hash/device archives into these
 files, removing redundant JSON copies only after a successful save. Provider
@@ -47,7 +47,7 @@ The archive layout is:
 
 ```text
 <sync.path>/
-|-- chatgpt/<account>/<conversation-id>.json
+|-- chatgpt/<account>/YYYY/MM/DD/<conversation-id>.json
 `-- devices/
     |-- work-laptop/
     |   |-- .buddy-sync-manifest.json

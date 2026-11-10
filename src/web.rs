@@ -158,7 +158,7 @@ pub fn save_snapshot(home: &Path, snapshot: &Snapshot) -> anyhow::Result<&'stati
     let root = private_dir(home, Path::new(".local/share/buddy/web/chatgpt"))?;
     let dir = private_dir(&root, Path::new(&snapshot.account))?;
     let _lock = account_lock(&dir)?;
-    replace_latest(&dir, snapshot)
+    save_dated(&dir, snapshot)
 }
 
 /// Save one canonical conversation, merging and removing legacy hash snapshots first.
@@ -168,38 +168,51 @@ pub fn save_shared_snapshot(archive: &Path, snapshot: &Snapshot) -> anyhow::Resu
     let root = private_dir(archive, Path::new("chatgpt"))?;
     let dir = private_dir(&root, Path::new(&snapshot.account))?;
     let _lock = account_lock(&dir)?;
-    let legacy = dir.join(snapshot.id());
-    let mut latest = std::borrow::Cow::Borrowed(snapshot);
+    save_dated(&dir, snapshot)
+}
+
+fn snapshot_date(snapshot: &Snapshot) -> anyhow::Result<String> {
+    chrono::DateTime::from_timestamp_millis((snapshot.revision() * 1000.0) as i64)
+        .map(|date| {
+            date.with_timezone(&chrono::Local)
+                .format("%Y/%m/%d")
+                .to_string()
+        })
+        .context("invalid conversation update time")
+}
+
+fn save_dated(dir: &Path, snapshot: &Snapshot) -> anyhow::Result<&'static str> {
+    let mut latest = snapshot.clone();
     let mut obsolete = Vec::new();
-    match std::fs::symlink_metadata(&legacy) {
-        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
-            for entry in std::fs::read_dir(&legacy)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.extension().is_none_or(|ext| ext != "json") {
-                    continue;
-                }
-                let old = read_snapshot(&path)?;
-                if old.account != snapshot.account || old.id() != snapshot.id() {
-                    bail!(
-                        "legacy snapshot identity does not match its path: {}",
-                        path.display()
-                    );
-                }
-                if old.newer_than(&latest) {
-                    latest = std::borrow::Cow::Owned(old);
-                }
-                obsolete.push(path);
-            }
+    let filename = format!("{}.json", snapshot.id());
+    let legacy = dir.join(snapshot.id());
+    for entry in walkdir::WalkDir::new(dir).follow_links(false) {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "json")
+            || (entry.file_name() != filename.as_str() && !path.starts_with(&legacy))
+        {
+            continue;
         }
-        Ok(_) => bail!("invalid legacy snapshot directory: {}", legacy.display()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-        Err(e) => return Err(e.into()),
+        let old = read_snapshot(path)?;
+        if old.account != snapshot.account || old.id() != snapshot.id() {
+            bail!(
+                "snapshot identity does not match its path: {}",
+                path.display()
+            );
+        }
+        if old.newer_than(&latest) {
+            latest = old;
+        }
+        obsolete.push(path.to_path_buf());
     }
-    let result = replace_latest(&dir, &latest)?;
-    // Only discard older copies after the canonical file has been safely published.
+    let dated = private_dir(dir, Path::new(&snapshot_date(&latest)?))?;
+    let destination = dated.join(filename);
+    let result = replace_latest(&dated, &latest)?;
     for path in obsolete {
-        std::fs::remove_file(path)?;
+        if path != destination {
+            std::fs::remove_file(path)?;
+        }
     }
     if legacy.is_dir() {
         match std::fs::remove_dir(&legacy) {
@@ -208,7 +221,11 @@ pub fn save_shared_snapshot(archive: &Path, snapshot: &Snapshot) -> anyhow::Resu
             Err(e) => return Err(e.into()),
         }
     }
-    Ok(result)
+    Ok(if latest.newer_than(snapshot) {
+        "stale"
+    } else {
+        result
+    })
 }
 
 /// Consume a legacy copy only after its content or a newer revision is safely stored.
@@ -237,6 +254,7 @@ pub(crate) fn move_snapshot_to_shared(
     };
     let destination = shared
         .join(&snapshot.account)
+        .join(snapshot_date(&snapshot)?)
         .join(format!("{}.json", snapshot.id()));
     if source == destination {
         return Ok("skipped");

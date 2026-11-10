@@ -171,12 +171,14 @@ conversation response, schema version (`1`), and local capture time. With
 `[sync].path` configured, `buddy web serve` writes directly to:
 
 ```text
-<sync.path>/chatgpt/<SHA-256 account namespace>/<conversation-id>.json
+<sync.path>/chatgpt/<SHA-256 account namespace>/YYYY/MM/DD/<conversation-id>.json
 ```
+
+Snapshots are organized by the conversation update date in the receiver’s local timezone. Updating a conversation across dates moves its latest snapshot to the new date directory. Existing flat and hash-based snapshots are migrated during archive synchronization. Weekly reports continue to filter individual message timestamps.
 
 No separate `buddy sync` is needed to publish browser captures to that directory.
 Without `[sync].path`, the receiver writes to
-`~/.local/share/buddy/web/chatgpt/<account>/<conversation-id>.json`. The pairing
+`~/.local/share/buddy/web/chatgpt/<account>/YYYY/MM/DD/<conversation-id>.json`. The pairing
 token always stays at `~/.local/share/buddy/web/token`; it is never archived.
 `--home` changes that local data/token HOME, while configuration is still loaded
 from the invoking user's HOME. `web status` and receiver startup print the selected
