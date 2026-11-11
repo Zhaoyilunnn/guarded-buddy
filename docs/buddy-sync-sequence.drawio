@@ -58,7 +58,7 @@
         <mxCell id="m3" value="Compute content digests" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.4286;entryX=0;entryY=0.1282;" edge="1" parent="1" source="act0" target="act4">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="m4" value="Update coding files; consolidate archived ChatGPT conversations" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.5714;entryX=0;entryY=0.137;" edge="1" parent="1" source="act0" target="act5">
+        <mxCell id="m4" value="Update coding history files" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.5714;entryX=0;entryY=0.137;" edge="1" parent="1" source="act0" target="act5">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
         <mxCell id="m5" value="Atomically update the manifest" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.7143;entryX=0;entryY=0.2055;" edge="1" parent="1" source="act0" target="act5">

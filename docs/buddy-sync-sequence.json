@@ -14,7 +14,7 @@
     {"from": "buddy", "to": "local", "label": "Scan supported coding history files"},
     {"from": "buddy", "to": "archive", "label": "Read the device manifest"},
     {"from": "buddy", "to": "local", "label": "Compute content digests"},
-    {"from": "buddy", "to": "archive", "label": "Update coding files; consolidate archived ChatGPT conversations"},
+    {"from": "buddy", "to": "archive", "label": "Update coding history files"},
     {"from": "buddy", "to": "archive", "label": "Atomically update the manifest"},
     {"from": "archive", "to": "provider", "label": "External product replicates the folder", "async": true},
     {"from": "buddy", "to": "user", "label": "Print created / updated / skipped / failed", "return": true},

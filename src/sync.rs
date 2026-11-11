@@ -76,15 +76,7 @@ pub fn sync(settings: &EffectiveSync) -> Result<SyncOutcome, SyncError> {
     let manifest_path = device_root.join(MANIFEST);
     let mut manifest = load_manifest(&manifest_path)?;
     let files = history_files(&settings.home, settings.agents.as_deref());
-    let mut outcome = if settings
-        .agents
-        .as_ref()
-        .is_none_or(|agents| agents.contains(&AgentKind::Chatgpt))
-    {
-        migrate_chatgpt(&settings.home, &settings.path)
-    } else {
-        SyncOutcome::default()
-    };
+    let mut outcome = SyncOutcome::default();
 
     for source in files {
         outcome.scanned += 1;

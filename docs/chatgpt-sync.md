@@ -25,7 +25,6 @@ buddy web serve
 buddy web pair
 buddy web status
 buddy wr collect --agents chatgpt --days 7
-buddy sync --agents chatgpt
 ```
 
 All three `web` subcommands accept `--home`. `serve` and `status` accept `--port`;
@@ -174,7 +173,7 @@ conversation response, schema version (`1`), and local capture time. With
 <sync.path>/chatgpt/<SHA-256 account namespace>/YYYY/MM/DD/<conversation-id>.json
 ```
 
-Snapshots are organized by the conversation update date in the receiver’s local timezone. Updating a conversation across dates moves its latest snapshot to the new date directory. Existing flat and hash-based snapshots are migrated during archive synchronization. Weekly reports continue to filter individual message timestamps.
+Snapshots are organized by the conversation update date in the receiver’s local timezone. Updating a conversation across dates moves its latest snapshot to the new date directory. Existing flat and hash-based snapshots are migrated when the receiver starts. Weekly reports continue to filter individual message timestamps.
 
 While `buddy web serve` runs, one background worker writes a same-name `.md` beside each snapshot. On startup,
 it scans file timestamps once to backfill missing or older Markdown. After that,
@@ -202,15 +201,16 @@ conversation content is skipped and older versions are ignored. Capture time is
 only a retrieval-time tie-breaker, not proof that the provider returned newer
 content. Replacement writes a temporary file, syncs it, and renames it over the
 canonical file. An account lock serializes comparison and publication across
-receiver and sync processes on the same machine.
+receiver processes on the same machine.
 
-`buddy sync` and receiver startup migrate archived device-HOME
+Receiver startup migrates archived device-HOME
 ChatGPT copies and legacy `chatgpt/<account>/<conversation-id>/<hash>.json`
-archives into the same canonical files. They retain the newest complete version,
-then remove redundant source JSON files only after publication succeeds. Invalid
+archives into the same canonical files. It retains the newest complete version,
+then removes redundant source JSON files only after publication succeeds. Invalid
 files or failed writes produce errors and keep the affected source copies for
 recovery. Local HOME ChatGPT captures are not scanned or migrated. Other providers'
-device archives are unchanged.
+device archives are unchanged. `buddy sync` does not scan or migrate ChatGPT
+files in either local HOME or the archive.
 
 The external cloud-folder client replicates the directory; buddy performs local
 filesystem operations. Use one writing device for the shared ChatGPT directory
@@ -320,7 +320,6 @@ sequenceDiagram
     end
     Receiver-->>Extension: Acknowledge saved / skipped / stale
     Extension->>Extension: Persist checkpoint and clear pending snapshot
-    User->>Archive: buddy sync migrates legacy captures to canonical files
     Note over Archive: External sync product replicates the directory
     User->>Report: buddy wr collect / run
     Report->>Local: Read live snapshots

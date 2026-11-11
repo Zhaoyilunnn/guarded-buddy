@@ -27,7 +27,7 @@ buddy does not copy the entire HOME directory. It copies only records supported 
 
 | Source | Synced content |
 | --- | --- |
-| ChatGPT web | Latest complete conversation at shared `chatgpt/<account>/YYYY/MM/DD/<conversation-id>.json` (excludes the pairing token) |
+| ChatGPT web | Written directly by the browser receiver; not scanned or migrated by `buddy sync` |
 | Codex | JSONL files under `.codex/sessions` |
 | Cursor | JSONL files under `agent-transcripts` in `.cursor/projects` |
 | Claude | JSONL files under `.claude/projects` |
@@ -36,9 +36,8 @@ buddy does not copy the entire HOME directory. It copies only records supported 
 Coding history is namespaced by device. ChatGPT keeps one latest complete file
 per account/conversation in `chatgpt/<account>/YYYY/MM/DD/<conversation-id>.json` instead.
 The browser receiver writes there directly when `[sync].path` is configured.
-`buddy sync` migrates legacy hash/device archives into these
-files, removing redundant JSON copies only after a successful save. Local HOME
-ChatGPT captures are not scanned or migrated. Provider
+`buddy sync` does not scan or migrate local or archived ChatGPT snapshots.
+Receiver startup retains compatibility migration for legacy archives. Provider
 `update_time` orders versions; `captured_at` breaks ties. Older versions cannot
 replace newer ones through buddy on the same machine. External cloud clients
 can still introduce conflicts between independently writing devices; use one
@@ -83,7 +82,7 @@ With a complete `[sync]` configuration:
 The archive and current HOME can contain copies of the same session. Collection deduplicates coding histories by agent, session ID, project, and message content.
 ChatGPT web histories select the newest complete snapshot per account and conversation
 before reading the current branch and filtering message dates. See [ChatGPT sync](chatgpt-sync.md).
-`buddy sync` copies already received snapshots; it does not contact ChatGPT or trigger the extension.
+`buddy sync` archives coding histories only; it does not contact ChatGPT or trigger the extension.
 
 ## Sequence diagram
 
@@ -101,7 +100,7 @@ sequenceDiagram
     Buddy->>Local: Scan supported raw history files
     Buddy->>Archive: Read the device manifest
     Buddy->>Local: Compute content digests
-    Buddy->>Archive: Update coding files; consolidate latest ChatGPT conversations
+    Buddy->>Archive: Update coding history files
     Buddy->>Archive: Atomically update the manifest
     Archive-->>Provider: External product replicates the folder
     Buddy-->>User: Print created / updated / skipped / failed

@@ -4,8 +4,8 @@ This sequence describes the current `buddy wr run` implementation. Collection ru
 in the foreground; summarization and optional email run in a separate worker.
 ChatGPT conversations must first be received through [browser sync](chatgpt-sync.md).
 With `[sync].path` configured, the receiver writes directly to one latest JSON file
-per conversation in the shared `chatgpt` directory. `wr run` migrates any remaining
-local captures and legacy version files before collection; it does not fetch ChatGPT.
+per conversation in the shared `chatgpt` directory. The sync step archives coding
+histories only; it does not scan, migrate, or fetch ChatGPT conversations.
 The output root is configurable; `out/<range>` below denotes its default layout.
 
 ```mermaid
@@ -21,7 +21,7 @@ sequenceDiagram
     User->>CLI: Run with options
     CLI->>CLI: Load config and resolve date range and backend
     opt Sync configured and --no-sync absent
-        CLI->>Sources: Archive coding histories; consolidate latest ChatGPT files in shared storage
+        CLI->>Sources: Archive coding histories
         Sources-->>CLI: Sync result
         Note over CLI,Sources: Reported sync failure stops the foreground command
     end

@@ -123,6 +123,41 @@ fn sync_leaves_local_chatgpt_snapshots_and_pairing_credentials_untouched() {
 }
 
 #[test]
+fn sync_does_not_inspect_or_migrate_archived_chatgpt_files() {
+    let home = tempfile::tempdir().unwrap();
+    let archive = tempfile::tempdir().unwrap();
+    let paths = [
+        archive
+            .path()
+            .join("devices/legacy/home/.local/share/buddy/web/chatgpt/account/old.json"),
+        archive
+            .path()
+            .join("chatgpt/account/conversation/hash.json"),
+    ];
+    for path in &paths {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "invalid legacy snapshot").unwrap();
+    }
+    for agents in [None, Some(vec![AgentKind::Chatgpt])] {
+        let settings = buddy::cli::EffectiveSync {
+            path: archive.path().into(),
+            device: "test".into(),
+            home: home.path().into(),
+            agents,
+        };
+        let result = buddy::sync::sync(&settings).unwrap();
+        assert_eq!(result.scanned, 0);
+        assert!(result.failures.is_empty());
+        for path in &paths {
+            assert_eq!(
+                std::fs::read_to_string(path).unwrap(),
+                "invalid legacy snapshot"
+            );
+        }
+    }
+}
+
+#[test]
 fn shared_conversations_keep_only_latest_and_migrate_device_copies() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
@@ -143,7 +178,7 @@ fn shared_conversations_keep_only_latest_and_migrate_device_copies() {
     let legacy = archive.path().join("devices/legacy/home");
     std::fs::create_dir_all(&legacy).unwrap();
     save_snapshot(&legacy, &old).unwrap();
-    let result = buddy::sync::sync(&settings).unwrap();
+    let result = buddy::sync::migrate_chatgpt(settings.home.as_path(), archive.path());
     assert_eq!(result.created, 0);
     assert!(result.failures.is_empty());
     assert!(
