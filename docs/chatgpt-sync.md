@@ -204,12 +204,13 @@ content. Replacement writes a temporary file, syncs it, and renames it over the
 canonical file. An account lock serializes comparison and publication across
 receiver and sync processes on the same machine.
 
-`buddy sync` and receiver startup migrate existing local captures, device-HOME
-ChatGPT copies, and legacy `chatgpt/<account>/<conversation-id>/<hash>.json`
+`buddy sync` and receiver startup migrate archived device-HOME
+ChatGPT copies and legacy `chatgpt/<account>/<conversation-id>/<hash>.json`
 archives into the same canonical files. They retain the newest complete version,
 then remove redundant source JSON files only after publication succeeds. Invalid
 files or failed writes produce errors and keep the affected source copies for
-recovery. Other providers' device archives are unchanged.
+recovery. Local HOME ChatGPT captures are not scanned or migrated. Other providers'
+device archives are unchanged.
 
 The external cloud-folder client replicates the directory; buddy performs local
 filesystem operations. Use one writing device for the shared ChatGPT directory

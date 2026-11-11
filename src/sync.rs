@@ -75,10 +75,7 @@ pub fn sync(settings: &EffectiveSync) -> Result<SyncOutcome, SyncError> {
 
     let manifest_path = device_root.join(MANIFEST);
     let mut manifest = load_manifest(&manifest_path)?;
-    let files = history_files(&settings.home, settings.agents.as_deref())
-        .into_iter()
-        .filter(|path| !path.starts_with(crate::web::history_root(&settings.home)))
-        .collect::<Vec<_>>();
+    let files = history_files(&settings.home, settings.agents.as_deref());
     let mut outcome = if settings
         .agents
         .as_ref()
@@ -126,7 +123,7 @@ pub fn sync(settings: &EffectiveSync) -> Result<SyncOutcome, SyncError> {
     Ok(outcome)
 }
 
-/// Consolidate local, device-HOME, and legacy hash snapshots into one file per conversation.
+/// Consolidate archived device-HOME and legacy hash snapshots into one file per conversation.
 pub fn migrate_chatgpt(home: &Path, archive: &Path) -> SyncOutcome {
     let mut outcome = SyncOutcome::default();
     if let Err(error) = validate_target(home, archive) {
@@ -134,9 +131,7 @@ pub fn migrate_chatgpt(home: &Path, archive: &Path) -> SyncOutcome {
         return outcome;
     }
     let mut files = Vec::new();
-    let mut homes = archive_homes(archive);
-    homes.push(home.to_path_buf());
-    for home in homes {
+    for home in archive_homes(archive) {
         collect_matching(&crate::web::history_root(&home), &mut files, |p| {
             extension(p, "json")
         });
@@ -229,11 +224,6 @@ fn history_files(home: &Path, selected: Option<&[AgentKind]>) -> Vec<PathBuf> {
         if history.is_file() {
             files.push(history);
         }
-    }
-    if enabled(AgentKind::Chatgpt) {
-        collect_matching(&crate::web::history_root(home), &mut files, |p| {
-            extension(p, "json")
-        });
     }
     files.sort();
     files.dedup();

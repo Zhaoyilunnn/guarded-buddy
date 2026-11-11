@@ -81,7 +81,7 @@ fn archive_collection_selects_newest_snapshot_before_date_filtering() {
 }
 
 #[test]
-fn sync_archives_only_chatgpt_snapshots_without_pairing_credentials() {
+fn sync_leaves_local_chatgpt_snapshots_and_pairing_credentials_untouched() {
     let home = tempfile::tempdir().unwrap();
     let archive = tempfile::tempdir().unwrap();
     let token = buddy::web::pairing_token(home.path()).unwrap();
@@ -93,8 +93,22 @@ fn sync_archives_only_chatgpt_snapshots_without_pairing_credentials() {
         home: home.path().into(),
         agents: Some(vec![AgentKind::Chatgpt]),
     };
-    assert_eq!(buddy::sync::sync(&settings).unwrap().created, 1);
-    assert_eq!(buddy::sync::sync(&settings).unwrap().created, 0);
+    assert_eq!(buddy::sync::sync(&settings).unwrap().scanned, 0);
+    let all_agents = buddy::cli::EffectiveSync {
+        agents: None,
+        path: settings.path.clone(),
+        device: settings.device.clone(),
+        home: settings.home.clone(),
+    };
+    assert_eq!(buddy::sync::sync(&all_agents).unwrap().scanned, 0);
+    assert!(!archive.path().join("chatgpt").exists());
+    assert!(
+        buddy::web::history_root(home.path())
+            .join(snapshot(100.0, "Answer").account)
+            .join("1970/01/01/conversation-1.json")
+            .is_file()
+    );
+    assert_eq!(buddy::web::pairing_token(home.path()).unwrap(), token);
     assert!(
         !archive
             .path()
@@ -115,18 +129,17 @@ fn shared_conversations_keep_only_latest_and_migrate_device_copies() {
     let archive = tempfile::tempdir().unwrap();
     let old = snapshot(100.0, "Old");
     let new = snapshot(200.0, "New");
-    save_snapshot(a.path(), &new).unwrap();
-    save_snapshot(b.path(), &new).unwrap();
+    buddy::web::save_shared_snapshot(archive.path(), &new).unwrap();
     let mut settings = buddy::cli::EffectiveSync {
         path: archive.path().into(),
         device: "a".into(),
         home: a.path().into(),
         agents: Some(vec![AgentKind::Chatgpt]),
     };
-    assert_eq!(buddy::sync::sync(&settings).unwrap().created, 1);
+    assert_eq!(buddy::sync::sync(&settings).unwrap().created, 0);
     settings.home = b.path().into();
     settings.device = "b".into();
-    assert_eq!(buddy::sync::sync(&settings).unwrap().skipped, 1);
+    assert_eq!(buddy::sync::sync(&settings).unwrap().scanned, 0);
     let legacy = archive.path().join("devices/legacy/home");
     std::fs::create_dir_all(&legacy).unwrap();
     save_snapshot(&legacy, &old).unwrap();
@@ -136,7 +149,7 @@ fn shared_conversations_keep_only_latest_and_migrate_device_copies() {
     assert!(
         !buddy::web::history_root(&legacy)
             .join(&old.account)
-            .join("conversation-1.json")
+            .join("1970/01/01/conversation-1.json")
             .exists()
     );
     let canonical = archive
@@ -233,12 +246,14 @@ fn failed_migration_retains_original_and_concurrent_writes_keep_newest() {
     let home = tempfile::tempdir().unwrap();
     let archive = tempfile::tempdir().unwrap();
     let body = snapshot(100.0, "Recoverable");
-    save_snapshot(home.path(), &body).unwrap();
+    let legacy_home = archive.path().join("devices/legacy/home");
+    std::fs::create_dir_all(&legacy_home).unwrap();
+    save_snapshot(&legacy_home, &body).unwrap();
     std::fs::write(archive.path().join("chatgpt"), "blocked destination").unwrap();
     let result = buddy::sync::migrate_chatgpt(home.path(), archive.path());
     assert!(!result.failures.is_empty());
     assert!(
-        buddy::web::history_root(home.path())
+        buddy::web::history_root(&legacy_home)
             .join(&body.account)
             .join("1970/01/01")
             .join("conversation-1.json")
@@ -274,7 +289,7 @@ fn failed_migration_retains_original_and_concurrent_writes_keep_newest() {
 
 #[cfg(unix)]
 #[test]
-fn wr_run_uses_latest_shared_conversation_and_consumes_old_local_copy() {
+fn wr_run_uses_latest_shared_conversation_and_preserves_old_local_copy() {
     let home = tempfile::tempdir().unwrap();
     let archive = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
@@ -334,9 +349,9 @@ fn wr_run_uses_latest_shared_conversation_and_consumes_old_local_copy() {
     assert!(notes.contains("Latest shared answer"));
     assert!(!notes.contains("Obsolete local answer"));
     assert!(
-        !buddy::web::history_root(home.path())
+        buddy::web::history_root(home.path())
             .join(&old.account)
-            .join("conversation-1.json")
+            .join("1970/01/01/conversation-1.json")
             .exists()
     );
 }
