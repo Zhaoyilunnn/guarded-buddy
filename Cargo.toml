@@ -2,7 +2,7 @@
 name = "buddy"
 version = "0.1.0"
 edition = "2024"
-description = "A guarded buddy — agents on a leash for weekly reports and signoff"
+description = "A guarded buddy — agents on a leash for weekly reports"
 license = "MIT"
 
 [[bin]]

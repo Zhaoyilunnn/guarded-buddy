@@ -1,4 +1,4 @@
-//! Detached background workers for wr report and signoff.
+//! Detached background workers for weekly reports.
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
@@ -8,7 +8,6 @@ use chrono::NaiveDate;
 
 use crate::cli::{BackendKind, EffectiveBackend, EffectiveCommon};
 use crate::domain::DateRange;
-use crate::signoff::SignoffSettings;
 
 #[derive(Debug)]
 pub struct SpawnedJob {
@@ -116,54 +115,6 @@ pub fn spawn_report_worker(
     })
 }
 
-/// Spawn `buddy signoff run --worker ...`.
-pub fn spawn_signoff_worker(
-    work_dir: &Path,
-    settings: &SignoffSettings,
-    backend: &EffectiveBackend,
-) -> std::io::Result<SpawnedJob> {
-    std::fs::create_dir_all(work_dir)?;
-    let log_path = work_dir.join("signoff.log");
-    let pid_path = work_dir.join("signoff.pid");
-    let report_path = work_dir.join("signoff.md");
-
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-    let log_err = log_file.try_clone()?;
-
-    let exe = std::env::current_exe()?;
-    let mut cmd = Command::new(exe);
-    cmd.arg("signoff")
-        .arg("run")
-        .arg("--worker")
-        .arg("--out")
-        .arg(&settings.out_dir)
-        .arg("--home")
-        .arg(&settings.home)
-        .arg("--window-hours")
-        .arg(settings.window_hours.to_string());
-    if settings.dry_run {
-        cmd.arg("--dry-run");
-    }
-    append_backend_args(&mut cmd, backend);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_err));
-    detach(&mut cmd);
-
-    let child = cmd.spawn()?;
-    let pid = child.id();
-    let _ = std::fs::write(&pid_path, format!("{pid}\n"));
-    Ok(SpawnedJob {
-        pid,
-        report_path,
-        log_path,
-        pid_path,
-    })
-}
-
 pub fn mail_subject(range: &DateRange) -> String {
     format!("AI weekly report {} ~ {}", range.start, range.end)
 }
@@ -180,11 +131,6 @@ pub fn mail_subject_for_report_path(report_path: &Path) -> String {
     {
         return format!("AI weekly report {start} ~ {end}");
     }
-    if parent_name.chars().filter(|c| *c == '-').count() == 2
-        && NaiveDate::parse_from_str(parent_name, "%Y-%m-%d").is_ok()
-    {
-        return format!("buddy signoff {parent_name}");
-    }
     "buddy mail".to_string()
 }
 
@@ -198,14 +144,6 @@ mod tests {
         assert_eq!(
             mail_subject_for_report_path(Path::new("out/2026-07-12_2026-07-18/report.md")),
             "AI weekly report 2026-07-12 ~ 2026-07-18"
-        );
-    }
-
-    #[test]
-    fn subject_from_signoff_day_dir() {
-        assert_eq!(
-            mail_subject_for_report_path(Path::new("out/signoff/2026-08-04/signoff.md")),
-            "buddy signoff 2026-08-04"
         );
     }
 }

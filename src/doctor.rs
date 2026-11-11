@@ -1,7 +1,7 @@
 //! Read-only diagnostics. Never execute configured commands or expose configuration contents.
 
 use crate::cli::{BackendArgs, BackendKind, resolve_backend};
-use crate::config::{Config, LlmConfig, SignoffConfig, WrConfig};
+use crate::config::{Config, LlmConfig, WrConfig};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -152,8 +152,7 @@ pub fn check(home: &Path) -> Report {
 
 fn inspect(report: &mut Report, home: &Path, config: &Config) {
     let wr = config.wr != WrConfig::default();
-    let signoff = config.signoff != SignoffConfig::default();
-    let llm = config.llm != LlmConfig::default() || wr || signoff;
+    let llm = config.llm != LlmConfig::default() || wr;
     if config.wr.days.is_some_and(|days| days == 0 || days > 366) {
         report.add(
             Status::Fail,
@@ -300,12 +299,7 @@ fn inspect(report: &mut Report, home: &Path, config: &Config) {
         report.add(Status::Skip, "Sync", "No sync.path configured");
     }
 
-    let email = config
-        .wr
-        .mail_to
-        .iter()
-        .chain(config.signoff.mail_to.iter())
-        .any(|to| !to.is_empty());
+    let email = config.wr.mail_to.iter().any(|to| !to.is_empty());
     if email {
         report.executable("mutt");
         let candidates = [
@@ -318,19 +312,6 @@ fn inspect(report: &mut Report, home: &Path, config: &Config) {
         report.add(Status::Warn, "Email delivery", "SMTP credentials, included configuration and delivery are not verified; no configuration executed or email sent");
     } else {
         report.add(Status::Skip, "Email", "No recipients configured");
-    }
-    if signoff {
-        report.executable("git");
-        for workspace in config.signoff.workspaces.iter().flatten() {
-            report.directory("Signoff workspace", Path::new(&workspace.path), false);
-        }
-        report.add(
-            Status::Warn,
-            "Signoff trust",
-            "Unlisted workspaces default to yolo; review workspace trust before enabling actions",
-        );
-    } else {
-        report.add(Status::Skip, "Signoff", "No signoff options configured");
     }
     if llm || config.out_dir.is_some() {
         let out = Path::new(config.out_dir.as_deref().unwrap_or("out"));
@@ -358,18 +339,11 @@ fn recent_run(report: &mut Report, out: &Path) {
         .max_depth(3)
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|e| {
-            e.file_type().is_file()
-                && (e.file_name() == "report.log" || e.file_name() == "signoff.log")
-        })
+        .filter(|e| e.file_type().is_file() && e.file_name() == "report.log")
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.into_path())))
         .max();
     let Some((_, path)) = latest else {
-        report.add(
-            Status::Skip,
-            "Recent run",
-            "No report.log or signoff.log found",
-        );
+        report.add(Status::Skip, "Recent run", "No report.log found");
         return;
     };
     let mut tail = Vec::new();

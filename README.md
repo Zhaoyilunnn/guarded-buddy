@@ -16,10 +16,6 @@ buddy
 |   |-- collect | report | run
 |   |-- mail <report.md>
 |   `-- sources
-|-- signoff                # end-of-day silent progress
-|   |-- run                # default: ingest -> plan -> act -> email
-|   |-- plan               # plan only (no act / no email)
-|   `-- mail <signoff.md>
 `-- completions <bash|zsh|fish>
 ```
 
@@ -56,7 +52,7 @@ Each invocation has a separate log, retained on failure and timeout.
 Stream labels and timestamps are added per received chunk; the final report
 still uses only stdout. These logs contain raw CLI output and may include
 conversation content or credentials. They do not expose activity the CLI does
-not emit. API backends and signoff do not enable this agent log.
+not emit. API backends do not enable this agent log.
 
 When `[sync]` is configured, `buddy wr run` first archives this device and then
 collects from every archived device plus the live local home. Use `--no-sync`
@@ -89,24 +85,10 @@ automatically every 15 minutes using your existing browser login.
 With `[sync].path` configured, the receiver saves directly to
 `<sync.path>/chatgpt/<account>/YYYY/MM/DD/<conversation-id>.json`; otherwise it uses local HOME. A background worker generates same-name Markdown files beside the JSON while the receiver runs.
 Each conversation keeps only its latest complete content. Weekly reports read the
-current conversation branch; web chats do not enter signoff.
+current conversation branch.
 Setup, recovery, permissions, and limitations: [ChatGPT sync](docs/chatgpt-sync.md).
 For startup on Linux or each WSL launch, see the
 [systemd service setup](docs/chatgpt-sync.md#automatic-startup-with-systemd-linux-and-wsl).
-
-### `signoff` - end of day
-
-1. **Ingest** last N hours (default 24) of AI coding chats  
-2. **Plan** structured todos; model + local gate classify `auto` vs `needs_human`  
-3. **Act** on high-confidence todos; Codex sandbox flags come from per-workspace `trust` (default `yolo`)  
-4. **Email** summary to `[signoff].mail_to`
-
-```sh
-buddy signoff              # background worker
-buddy signoff plan         # plan only -> plan.json
-buddy signoff --dry-run    # plan + signoff.md, no agent actions
-buddy signoff mail out/signoff/2026-08-04/signoff.md
-```
 
 ## Install
 
@@ -138,32 +120,9 @@ device = "work-laptop"          # unique and stable on every device
 
 [web]
 max_body_mib = 100             # maximum browser upload request size in MiB
-
-[signoff]
-window_hours = 24
-mail_to = ["me@example.com"]
-max_auto_todos = 3
-act_timeout_secs = 7200
-dry_run = false
-
-# Optional trust overrides for act (unlisted paths default to yolo):
-# yolo | workspace-write | read-only
-[[signoff.workspaces]]
-path = "/home/you/proj-a"
-trust = "workspace-write"
-
-[[signoff.workspaces]]
-path = "/home/you/proj-b"
-trust = "yolo"
 ```
 
-| `trust` | Codex act flags |
-|---------|-----------------|
-| `yolo` (default) | `--dangerously-bypass-approvals-and-sandbox` |
-| `workspace-write` | `-s workspace-write` |
-| `read-only` | `-s read-only` |
-
-Priority: **CLI flag > config > defaults**. `wr` and `signoff` use **separate** `mail_to` lists.
+Priority: **CLI flag > config > defaults**.
 
 ## Development
 

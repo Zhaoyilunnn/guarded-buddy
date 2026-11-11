@@ -236,8 +236,7 @@ source warning instead of invented report dates.
 
 Daily Markdown shows the ChatGPT title and original conversation URL. The source
 slug is `chatgpt`, distinct from the existing `codex` coding source. Existing
-message truncation and secret redaction apply. Web conversations are excluded
-from `signoff` ingestion and automatic actions.
+message truncation and secret redaction apply.
 
 ## Incremental sync and recovery
 
@@ -340,6 +339,6 @@ node extension/chatgpt/tests/background.test.js
 
 Rust integration tests exercise a real loopback receiver, authentication, atomic
 updates, archival, branch filtering, latest-snapshot selection, CLI collection,
-and signoff exclusion. Extension tests mock provider/receiver responses and
+and weekly-report ingestion. Extension tests mock provider/receiver responses and
 browser storage, including offline delivery and worker restart. They do not
 replace a live test in an authenticated browser account.

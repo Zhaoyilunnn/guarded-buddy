@@ -1,4 +1,4 @@
-//! CLI: nested skills `wr` / `signoff`, history sync, and browser ingestion.
+//! CLI: weekly reports, history sync, and browser ingestion.
 
 use std::path::PathBuf;
 
@@ -7,13 +7,12 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::config::Config;
 use crate::domain::{AgentKind, DateRange, DomainError};
-use crate::signoff::{SignoffSettings, WorkspaceTrustEntry};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "buddy",
     version,
-    about = "A guarded buddy — agents on a leash for weekly reports and signoff"
+    about = "A guarded buddy — agents on a leash for weekly reports"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -31,8 +30,6 @@ pub enum Command {
     /// Weekly report skill
     #[command(name = "wr", visible_alias = "weekly-report")]
     Wr(WrArgs),
-    /// End-of-day silent progress skill
-    Signoff(SignoffArgs),
     /// Generate shell completion script
     Completions(CompletionsArgs),
 }
@@ -82,42 +79,6 @@ pub enum WrCommand {
     Run(RunArgs),
     Mail(MailArgs),
     Sources(SourcesArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct SignoffArgs {
-    #[command(subcommand)]
-    pub command: Option<SignoffCommand>,
-    #[command(flatten)]
-    pub run: SignoffRunArgs,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum SignoffCommand {
-    /// Ingest, plan, act, and email (default when no subcommand)
-    Run(SignoffRunArgs),
-    /// Ingest and plan only (no action or email)
-    Plan(SignoffRunArgs),
-    /// Resend an existing signoff.md
-    Mail(MailArgs),
-}
-
-#[derive(Debug, Default, Args)]
-pub struct SignoffRunArgs {
-    #[command(flatten)]
-    pub llm: BackendArgs,
-    /// Output root (default out)
-    #[arg(long)]
-    pub out: Option<PathBuf>,
-    /// Override $HOME
-    #[arg(long)]
-    pub home: Option<PathBuf>,
-    /// Lookback hours (default 24)
-    #[arg(long)]
-    pub window_hours: Option<u64>,
-    /// Force dry-run (plan only actions, still writes signoff.md on run)
-    #[arg(long)]
-    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -388,7 +349,7 @@ pub fn resolve_common(
     })
 }
 
-/// Resolve LLM backend; `mail_to` comes from skill section (wr or signoff).
+/// Resolve LLM backend; `mail_to` comes from weekly-report section.
 pub fn resolve_backend(
     args: &BackendArgs,
     config: &Config,
@@ -449,52 +410,6 @@ pub fn resolve_mail_to(cli: &Option<Vec<String>>, skill_default: Option<&[String
         .unwrap_or_default()
 }
 
-pub fn resolve_signoff_settings(
-    args: &SignoffRunArgs,
-    config: &Config,
-    default_home: &std::path::Path,
-) -> SignoffSettings {
-    let conf = &config.signoff;
-    let min_confidence = conf
-        .min_confidence
-        .as_deref()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.8);
-    let workspaces = conf
-        .workspaces
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|e| WorkspaceTrustEntry {
-            path: PathBuf::from(e.path),
-            trust: e.trust,
-        })
-        .collect();
-    SignoffSettings {
-        window_hours: args.window_hours.or(conf.window_hours).unwrap_or(24),
-        mail_to: args
-            .llm
-            .mail_to
-            .clone()
-            .or_else(|| conf.mail_to.clone())
-            .unwrap_or_default(),
-        workspaces,
-        max_auto_todos: conf.max_auto_todos.unwrap_or(3),
-        act_timeout_secs: conf.act_timeout_secs.unwrap_or(7200),
-        dry_run: args.dry_run || conf.dry_run.unwrap_or(false),
-        min_confidence,
-        out_dir: args
-            .out
-            .clone()
-            .or_else(|| config.out_dir.as_ref().map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("out")),
-        home: args
-            .home
-            .clone()
-            .unwrap_or_else(|| default_home.to_path_buf()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,22 +462,6 @@ mod tests {
     fn parses_weekly_report_alias() {
         let cli = Cli::try_parse_from(["buddy", "weekly-report", "sources"]).unwrap();
         assert!(matches!(cli.command, Command::Wr(_)));
-    }
-
-    #[test]
-    fn parses_signoff_default_and_plan() {
-        let cli = Cli::try_parse_from(["buddy", "signoff", "--dry-run"]).unwrap();
-        let Command::Signoff(args) = cli.command else {
-            panic!("expected signoff")
-        };
-        assert!(args.command.is_none());
-        assert!(args.run.dry_run);
-
-        let cli = Cli::try_parse_from(["buddy", "signoff", "plan"]).unwrap();
-        let Command::Signoff(args) = cli.command else {
-            panic!("expected signoff")
-        };
-        assert!(matches!(args.command, Some(SignoffCommand::Plan(_))));
     }
 
     #[test]

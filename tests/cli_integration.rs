@@ -67,27 +67,6 @@ fn fake_backend_script() -> (tempfile::TempDir, std::path::PathBuf) {
     (tmp, path)
 }
 
-fn fake_plan_script() -> (tempfile::TempDir, std::path::PathBuf) {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("fake-plan.sh");
-    std::fs::write(
-        &path,
-        r#"#!/bin/sh
-cat > /dev/null
-cat <<'EOF'
-{"todos":[{"id":"t1","title":"noop","detail":"x","autonomy":"needs_human","confidence":0.5,"needs_human_reason":"demo","workspace":null,"acceptance":"n/a","evidence":[]}]}
-EOF
-"#,
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    (tmp, path)
-}
-
 /// Empty config HOME (no `~/.config/buddy`) + chat `--home` stays separate.
 /// Keep the returned TempDir alive for the whole test (including detached workers).
 fn base_cmd() -> (tempfile::TempDir, Command) {
@@ -384,39 +363,6 @@ fn wr_mail_missing_report_fails() {
     .assert()
     .failure()
     .stderr(predicate::str::contains("not found"));
-}
-
-#[test]
-fn signoff_plan_with_fake_llm() {
-    let (_cfg, mut cmd) = base_cmd();
-    let home = fake_home();
-    let out = tempfile::tempdir().unwrap();
-    let (_t, script) = fake_plan_script();
-    cmd.args([
-        "signoff",
-        "plan",
-        "--home",
-        home.path().to_str().unwrap(),
-        "--out",
-        out.path().to_str().unwrap(),
-        "--cmd",
-        script.to_str().unwrap(),
-        "--window-hours",
-        "876000",
-    ])
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("Signoff plan"));
-
-    let signoff_root = out.path().join("signoff");
-    let day_dir = std::fs::read_dir(&signoff_root)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    assert!(day_dir.join("plan.json").exists());
-    assert!(day_dir.join("context.md").exists());
 }
 
 #[test]

@@ -4,7 +4,6 @@ use buddy::sources::HistorySource;
 use buddy::web::{Snapshot, save_snapshot};
 use chrono::{Local, TimeZone, Utc};
 use serde_json::json;
-use std::path::Path;
 
 fn snapshot(revision: f64, answer: &str) -> Snapshot {
     let now = Utc::now().timestamp() as f64;
@@ -565,31 +564,6 @@ fn receiver_and_cli_collect_enforce_auth_and_render_current_branch() {
     assert!(daily.contains("Current answer"));
     assert!(!daily.contains("Discarded branch"));
     assert!(daily.contains("https://chatgpt.com/c/conversation-1"));
-}
-
-#[test]
-fn signoff_does_not_ingest_web_conversations() {
-    let home = tempfile::tempdir().unwrap();
-    let out = tempfile::tempdir().unwrap();
-    save_snapshot(home.path(), &snapshot(100.0, "Run dangerous action")).unwrap();
-    let settings = buddy::cli::resolve_signoff_settings(
-        &buddy::cli::SignoffRunArgs {
-            home: Some(home.path().into()),
-            out: Some(out.path().into()),
-            ..Default::default()
-        },
-        &buddy::config::Config::default(),
-        Path::new("/unused"),
-    );
-    let result = buddy::signoff::ingest(&settings).unwrap();
-    let text = walkdir::WalkDir::new(&result.dir)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-        .map(|e| std::fs::read_to_string(e.path()).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(!text.contains("Run dangerous action"));
 }
 
 #[test]

@@ -5,13 +5,10 @@ use std::path::Path;
 
 use anyhow::Context;
 use buddy::app;
-use buddy::cli::{
-    self, Cli, Command, ShellKind, SignoffCommand, WrCommand, resolve_signoff_settings,
-};
+use buddy::cli::{self, Cli, Command, ShellKind, WrCommand};
 use buddy::config::Config;
 use buddy::job::{self, mail_subject, mail_subject_for_report_path};
 use buddy::mail::{self, mutt_available, mutt_missing_hint};
-use buddy::signoff::{self, mail_subject_for_day};
 use buddy::sources::default_sources;
 use chrono::Local;
 use clap::{CommandFactory, Parser};
@@ -99,73 +96,6 @@ fn main() -> anyhow::Result<()> {
                 send_mail_only(&args.report, &to)?;
             }
         },
-        Command::Signoff(args) => {
-            let (action, run_args) = match args.command {
-                None => (SignoffAction::Run, args.run),
-                Some(SignoffCommand::Run(r)) => (SignoffAction::Run, r),
-                Some(SignoffCommand::Plan(r)) => (SignoffAction::Plan, r),
-                Some(SignoffCommand::Mail(m)) => {
-                    let to = cli::resolve_mail_to(&m.mail_to, config.signoff.mail_to.as_deref());
-                    send_mail_only(&m.report, &to)?;
-                    return Ok(());
-                }
-            };
-            let settings = resolve_signoff_settings(&run_args, &config, &default_home);
-            let backend =
-                cli::resolve_backend(&run_args.llm, &config, Some(settings.mail_to.as_slice()))?;
-            match action {
-                SignoffAction::Plan => {
-                    let (ingest, gated) = signoff::run_plan(&settings, &backend)?;
-                    println!(
-                        "Signoff plan → {} (auto={}, needs_human={}, deferred={})",
-                        ingest.dir.join("plan.json").display(),
-                        gated.auto.len(),
-                        gated.needs_human.len(),
-                        gated.deferred.len()
-                    );
-                }
-                SignoffAction::Run => {
-                    if run_args.llm.worker {
-                        let path = signoff::run_full(&settings, &backend)?;
-                        eprintln!("signoff: wrote {}", path.display());
-                        if !settings.mail_to.is_empty() {
-                            if !mutt_available() {
-                                eprintln!("signoff: {}", mutt_missing_hint());
-                            } else {
-                                let day = Local::now().date_naive();
-                                match mail::send_report_with_mutt(
-                                    &settings.mail_to,
-                                    &mail_subject_for_day(day),
-                                    &path,
-                                ) {
-                                    Ok(()) => eprintln!(
-                                        "signoff: emailed {}",
-                                        settings.mail_to.join(", ")
-                                    ),
-                                    Err(e) => {
-                                        eprintln!("signoff: mail failed (signoff.md kept): {e}")
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        // Pre-create today's dir for pid/log paths.
-                        let day = Local::now().date_naive();
-                        let work_dir = settings.out_dir.join("signoff").join(day.to_string());
-                        if !settings.mail_to.is_empty() && !mutt_available() {
-                            eprintln!("{}", mutt_missing_hint());
-                        }
-                        let job = job::spawn_signoff_worker(&work_dir, &settings, &backend)?;
-                        println!(
-                            "Signoff started in background (pid {}) → {} (log: {})",
-                            job.pid,
-                            job.report_path.display(),
-                            job.log_path.display()
-                        );
-                    }
-                }
-            }
-        }
     }
     Ok(())
 }
@@ -198,11 +128,6 @@ fn run_sync(settings: &cli::EffectiveSync) -> anyhow::Result<()> {
         );
     }
     Ok(())
-}
-
-enum SignoffAction {
-    Run,
-    Plan,
 }
 
 fn print_collect_result(outcome: &buddy::collect::CollectOutcome) {
@@ -271,7 +196,7 @@ fn run_wr_worker(
 fn send_mail_only(report_path: &Path, mail_to: &[String]) -> anyhow::Result<()> {
     if !report_path.is_file() {
         anyhow::bail!(
-            "report file not found: {} (generate it with wr/signoff first)",
+            "report file not found: {} (generate it with wr first)",
             report_path.display()
         );
     }

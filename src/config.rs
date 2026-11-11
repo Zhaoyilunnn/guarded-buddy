@@ -13,7 +13,6 @@ pub struct Config {
     pub wr: WrConfig,
     pub sync: SyncConfig,
     pub web: WebConfig,
-    pub signoff: SignoffConfig,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
@@ -49,27 +48,6 @@ pub struct WrConfig {
     pub mail_to: Option<Vec<String>>,
     pub include_prompt_history: Option<bool>,
     pub template: Option<PathBuf>,
-}
-
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct SignoffConfig {
-    pub window_hours: Option<u64>,
-    pub mail_to: Option<Vec<String>>,
-    /// Per-workspace trust overrides; unlisted paths default to `yolo`.
-    pub workspaces: Option<Vec<WorkspaceTrustConfig>>,
-    pub max_auto_todos: Option<usize>,
-    pub act_timeout_secs: Option<u64>,
-    pub dry_run: Option<bool>,
-    pub min_confidence: Option<String>,
-}
-
-/// One `[[signoff.workspaces]]` entry.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct WorkspaceTrustConfig {
-    pub path: String,
-    #[serde(default)]
-    pub trust: crate::signoff::WorkspaceTrust,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -120,7 +98,6 @@ mod tests {
         assert!(config.out_dir.is_none());
         assert!(config.llm.backend.is_none());
         assert!(config.wr.mail_to.is_none());
-        assert!(config.signoff.mail_to.is_none());
     }
 
     #[test]
@@ -142,16 +119,6 @@ path = "/tmp/buddy-archive"
 device = "work-laptop"
 [web]
 max_body_mib = 48
-[signoff]
-window_hours = 24
-mail_to = ["me@example.com"]
-max_auto_todos = 2
-act_timeout_secs = 7200
-dry_run = true
-
-[[signoff.workspaces]]
-path = "/tmp/proj"
-trust = "workspace-write"
 "#,
         )
         .unwrap();
@@ -169,16 +136,6 @@ trust = "workspace-write"
             config.wr.mail_to.as_deref(),
             Some(["weekly@example.com".to_string()].as_slice())
         );
-        assert_eq!(
-            config.signoff.mail_to.as_deref(),
-            Some(["me@example.com".to_string()].as_slice())
-        );
-        let ws = config.signoff.workspaces.as_ref().unwrap();
-        assert_eq!(ws.len(), 1);
-        assert_eq!(ws[0].path, "/tmp/proj");
-        assert_eq!(ws[0].trust, crate::signoff::WorkspaceTrust::WorkspaceWrite);
-        assert_eq!(config.signoff.act_timeout_secs, Some(7200));
-        assert_eq!(config.signoff.dry_run, Some(true));
     }
 
     #[test]
