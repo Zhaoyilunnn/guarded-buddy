@@ -14,6 +14,8 @@ test("sync checkpoints, current saves, offline queue and worker restart", async 
   let updated = 100;
   let storageId = "local";
   let acknowledgement = "created";
+  let currentNode = "node";
+  let lastPayload;
   globalThis.chrome = {
     storage: { local: {
       async get(keys) {
@@ -33,11 +35,12 @@ test("sync checkpoints, current saves, offline queue and worker restart", async 
     if (url.includes("/conversations?")) return reply({ total: 1, items: [{ id: "chat-1", update_time: updated }] });
     if (url.endsWith("/conversation/chat-1")) {
       details++;
-      return reply({ conversation_id: "chat-1", mapping: {}, current_node: "node", update_time: updated });
+      return reply({ conversation_id: "chat-1", mapping: {}, current_node: currentNode, update_time: updated });
     }
     if (url.endsWith("/v1/chatgpt")) {
       assert.equal(options.headers.Authorization, `Bearer ${"b".repeat(64)}`);
       const payload = JSON.parse(options.body);
+      lastPayload = payload;
       assert.equal(payload.account.length, 64);
       assert.equal(options.body.includes("provider-secret"), false);
       if (failIngest) throw new TypeError("Failed to fetch");
@@ -107,4 +110,18 @@ test("sync checkpoints, current saves, offline queue and worker restart", async 
   await send({ type: "sync", full: true });
   assert.equal(data.status.saved, 0);
   assert.equal(data.status.skipped, 1);
+  const checkpointKey = Object.keys(data).find(key => key.startsWith("checkpoints:") && key.endsWith(":shared"));
+  const beforeRecheck = details;
+  currentNode = "new-message-with-same-update-time";
+  data[checkpointKey]["chat-1"].checkedAt = Date.now() - 15 * 60000;
+  acknowledgement = "updated";
+  await send({ type: "sync" });
+  assert.equal(details, beforeRecheck + 1, "expired checkpoints must recheck unchanged list timestamps");
+  assert.equal(lastPayload.conversation.current_node, currentNode);
+  assert.equal(data.status.saved, 1);
+  await send({ type: "sync" });
+  assert.equal(details, beforeRecheck + 1, "fresh checkpoints still skip unchanged conversations");
+  data[checkpointKey]["chat-1"] = updated;
+  await send({ type: "sync" });
+  assert.equal(details, beforeRecheck + 2, "legacy numeric checkpoints must be revalidated");
 });

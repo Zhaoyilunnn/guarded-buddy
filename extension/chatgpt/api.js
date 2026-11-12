@@ -3,6 +3,7 @@ export async function request(url, token, fetcher = fetch) {
   for (let attempt = 0; attempt < 4; attempt++) {
     const response = await fetcher(url, {
       credentials: "include",
+      cache: "no-store",
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       signal: AbortSignal.timeout(30000),
     });

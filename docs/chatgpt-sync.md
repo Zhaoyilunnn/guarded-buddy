@@ -242,7 +242,11 @@ message truncation and secret redaction apply.
 ## Incremental sync and recovery
 
 - **Sync history** compares list update timestamps with locally acknowledged
-  revisions, fetching details only for changed or unrecognized conversations.
+  revisions, fetching details for changed or unrecognized conversations. Matching
+  checkpoints expire after 15 minutes, so later syncs recheck details even when
+  the provider's list timestamp does not reflect a content change. Provider
+  requests bypass the browser HTTP cache. Older extension checkpoints without a
+  verification time are rechecked once after upgrading.
 - **Recheck all history** fetches every listed conversation regardless of the
   checkpoint. Use it after restoring/deleting the local archive or if a provider
   update timestamp failed to reflect a change. Saving the current conversation

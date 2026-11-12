@@ -10,6 +10,7 @@ test("provider requests carry browser credentials and classify login errors", as
   });
   assert.deepEqual(result, { value: 1 });
   assert.equal(call.options.credentials, "include");
+  assert.equal(call.options.cache, "no-store");
   assert.equal(call.options.headers.Authorization, "Bearer secret");
   for (const status of [401, 403]) {
     await assert.rejects(request("unused", null, async () => ({ status })), /Sign in to ChatGPT/);

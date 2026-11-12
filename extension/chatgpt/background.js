@@ -2,6 +2,7 @@ import { login, listPage, conversation, revision } from "./api.js";
 
 let running = false;
 const defaults = { port: 18242, token: "", autoSync: false };
+const checkpointMaxAge = 15 * 60000;
 
 async function settings() {
   return { ...defaults, ...await chrome.storage.local.get(Object.keys(defaults)) };
@@ -80,13 +81,17 @@ async function sync({ currentId = null, full = false, resume = false } = {}) {
       for (; progress.index < progress.items.length; progress.index++) {
         const item = progress.items[progress.index];
         const updated = revision(item.update_time);
-        if (!full && !currentId && updated > 0 && checkpoints[item.id] === updated) skipped++;
+        const checkpoint = checkpoints[item.id];
+        // List timestamps can lag content changes; periodically verify the details.
+        const age = Date.now() - checkpoint?.checkedAt;
+        if (!full && !currentId && updated > 0 && checkpoint?.revision === updated
+            && age >= 0 && age < checkpointMaxAge) skipped++;
         else {
           const body = await conversation(auth.token, item.id);
           const payload = { schema_version: 1, account: auth.account, captured_at: new Date().toISOString(), conversation: body };
           await chrome.storage.local.set({ pending: payload });
           const acknowledgement = await receiver(config, "/v1/chatgpt", payload);
-          checkpoints[item.id] = revision(body.update_time);
+          checkpoints[item.id] = { revision: revision(body.update_time), checkedAt: Date.now() };
           await chrome.storage.local.set({ [checkpointKey]: checkpoints });
           await chrome.storage.local.remove("pending");
           if (acknowledgement.status === "created" || acknowledgement.status === "updated") saved++;
