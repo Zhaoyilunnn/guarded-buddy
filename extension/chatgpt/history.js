@@ -4,6 +4,7 @@ let total = 0;
 let active = "archives";
 let requestId = 0;
 let runOffset = 0;
+let catalogTimer;
 function detail(list, name, value, className) {
   list.append(element("dt", name), element("dd", value || "—", className));
 }
@@ -17,23 +18,25 @@ function action(text, callback) {
   });
   return button;
 }
-async function archives() {
+async function archives(force = false) {
+  clearTimeout(catalogTimer);
   const id = ++requestId;
   $("archiveSummary").textContent = "Reading the receiver’s archive…";
   let data;
   try {
-    data = await send({ type: "archives", q: $("search").value, account: $("account").value, offset, limit: 25 });
+    data = await send({ type: "archives", q: $("search").value, account: $("account").value, offset, limit: 25, refresh: force });
   } catch (error) {
     if (id === requestId) $("archiveSummary").textContent = "Archive list unavailable. Any previous results below have not been refreshed.";
     throw error;
   }
   if (id !== requestId) return;
+  if (data.refreshing && active === "archives") catalogTimer = setTimeout(() => archives().catch(error => { $("feedback").textContent = error.message; }), 1000);
   total = data.total;
   const selected = $("account").value;
   $("account").replaceChildren(new Option("All accounts", ""), ...data.accounts.map(a => new Option(a, a)));
   $("account").value = selected;
   $("archives").replaceChildren();
-  $("archiveSummary").textContent = `${total} archived conversations · Sorted by most recent file save`;
+  $("archiveSummary").textContent = `${total} archived conversations · ${data.refreshing ? "Checking disk in background; showing last index" : "Sorted by most recent file save"}`;
   $("warnings").textContent = data.warnings.join("\n");
   for (const row of data.items) {
     const card = element("details", null, "card");
@@ -68,10 +71,12 @@ async function archives() {
 }
 async function runs() {
   const opened = new Set([...$("runs").querySelectorAll("details[open]")].map(node => node.dataset.taskId));
-  const { runs = [], historyStartedAt, status = {} } = await chrome.storage.local.get(["runs", "historyStartedAt", "status"]);
+  const { historyStartedAt, status = {} } = await chrome.storage.local.get(["historyStartedAt", "status"]);
+  const taskPage = await send({ type: "tasks", offset: runOffset });
+  const runs = taskPage.items;
   $("retention").textContent = `Task details are kept for 90 days after completion. Recording started ${date(historyStartedAt)}; earlier tasks cannot be reconstructed.`;
   $("runs").replaceChildren();
-  for (const summaryRun of runs.slice(runOffset, runOffset + 25)) {
+  for (const summaryRun of runs) {
     const run = summaryRun.id === status.id ? { ...summaryRun, ...status } : summaryRun;
     const card = element("details", null, "card");
     card.dataset.taskId = run.id;
@@ -86,33 +91,45 @@ async function runs() {
     detail(list, "Finished", run.endedAt ? date(run.endedAt) : "Not finished");
     detail(list, "Checked", `${run.checked || 0}${run.total != null ? ` / ${run.total}` : ""}`);
     if (run.previouslyChecked) detail(list, "Before this update", `${run.previouslyChecked} checked; earlier per-item outcomes are unavailable`);
+    detail(list, "Details read", String(run.detailsRead || 0));
     detail(list, "Failed", String(run.failed || 0));
     detail(list, "Identical content", String(run.unchanged || 0));
     detail(list, "Recently verified", String(run.checkpointSkipped || 0));
     detail(list, "Older ignored", String(run.stale || 0));
     if (run.error) detail(list, "Error", run.error, "error");
     const rows = element("div", null, "task-results");
-    card.addEventListener("toggle", async () => {
-      if (!card.open) return;
-      const data = (await chrome.storage.local.get(`run:${run.id}`))[`run:${run.id}`];
+    let itemOffset = 0;
+    async function loadResults() {
+      const data = await send({ type: "taskResults", taskId: run.id, offset: itemOffset });
       rows.replaceChildren();
-      for (const item of data?.results || []) {
+      for (const item of data.items) {
         const row = element("div", null, "task-result");
         const heading = element("div", null, "row");
         heading.append(link(item.title, `https://chatgpt.com/c/${encodeURIComponent(item.id)}`), element("span", labels[item.outcome] || item.outcome, "badge"));
         row.append(heading, element("small", date(item.at)));
+        if (item.timings) row.append(element("p", Object.entries(item.timings).filter(([, value]) => Number.isFinite(value)).map(([name, value]) => `${({providerMs: "ChatGPT", queueMs: "Queue", receiverMs: "Receiver", jsonSaveMs: "JSON save", commitMs: "Local commit"})[name] || name}: ${(value / 1000).toFixed(2)}s`).join(" · "), "muted"));
         if (item.error) row.append(element("p", item.error, "error"));
         rows.append(row);
       }
-      if (!data?.results.length) rows.append(element("p", "No conversations processed yet.", "muted"));
+      if (!data.items.length) rows.append(element("p", "No conversations processed yet.", "muted"));
+      const controls = element("div", null, "row between");
+      const previous = action("Previous results", async () => { itemOffset = Math.max(0, itemOffset - 25); await loadResults(); });
+      const next = action("Next results", async () => { itemOffset += 25; await loadResults(); });
+      previous.disabled = itemOffset === 0;
+      next.disabled = itemOffset + 25 >= data.total;
+      controls.append(previous, element("small", `${data.total} results`), next);
+      rows.append(controls);
+    }
+    card.addEventListener("toggle", () => {
+      if (card.open) loadResults().catch(error => { $("feedback").textContent = error.message; });
     });
     card.append(summary, list, rows);
     $("runs").append(card);
     card.open = opened.has(run.id);
   }
   $("previousRuns").disabled = runOffset === 0;
-  $("nextRuns").disabled = runOffset + 25 >= runs.length;
-  $("runsPage").textContent = runs.length ? `${runOffset + 1}–${Math.min(runOffset + 25, runs.length)} of ${runs.length}` : "0 tasks";
+  $("nextRuns").disabled = runOffset + 25 >= taskPage.total;
+  $("runsPage").textContent = runs.length ? `${runOffset + 1}–${Math.min(runOffset + 25, taskPage.total)} of ${taskPage.total}` : "0 tasks";
   if (!runs.length) $("runs").append(element("p", "No sync tasks recorded yet.", "empty"));
 }
 async function refresh() {
@@ -122,6 +139,7 @@ async function refresh() {
 }
 function tab(name) {
   active = name;
+  clearTimeout(catalogTimer);
   for (const value of ["archives", "runs"]) {
     $(`${value}Panel`).hidden = value !== name;
     $(`${value}Tab`).setAttribute("aria-selected", String(value === name));
@@ -130,7 +148,7 @@ function tab(name) {
 }
 bind("archivesTab", () => tab("archives"));
 bind("runsTab", () => tab("runs"));
-bind("refresh", refresh);
+bind("refresh", () => active === "archives" ? archives(true) : refresh());
 bind("previousRuns", () => { runOffset = Math.max(0, runOffset - 25); return runs(); });
 bind("nextRuns", () => { runOffset += 25; return runs(); });
 let refreshTimer;

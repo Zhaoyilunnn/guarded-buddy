@@ -1,6 +1,6 @@
 export const $ = id => document.getElementById(id);
 export const date = value => value ? new Date(value).toLocaleString() : "Never";
-export const labels = { created: "New", updated: "Updated", unchanged: "Identical content", stale: "Older revision ignored", checkpointSkipped: "Recently verified", failed: "Failed", completed: "Completed", paused: "Paused", running: "Running", interrupted: "Waiting to resume", discarded: "Discarded", ready: "Ready", pending: "Generating" };
+export const labels = { created: "New", updated: "Updated", unchanged: "Identical content", stale: "Older revision ignored", checkpointSkipped: "Recently verified", failed: "Failed", completed: "Completed", paused: "Paused", running: "Running", interrupted: "Waiting to resume", discarded: "Discarded", ready: "Ready", pending: "Queued", queued: "Queued", generating: "Generating" };
 export async function send(message) {
   const response = await chrome.runtime.sendMessage(message);
   if (!response?.ok) throw new Error(response?.error || "Extension unavailable");

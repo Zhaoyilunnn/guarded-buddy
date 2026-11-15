@@ -1,3 +1,4 @@
+import * as db from "./store.js";
 import { login, listPage, conversation, revision } from "./api.js";
 
 const interval = 15 * 60000;
@@ -54,28 +55,10 @@ async function health(config) {
   }
 }
 
-async function prune() {
-  const { runs = [] } = await chrome.storage.local.get("runs");
-  const expired = runs.filter(r => r.endedAt && r.endedAt < Date.now() - retention);
-  await chrome.storage.local.remove(expired.map(r => `run:${r.id}`));
-  const kept = runs.filter(r => !expired.some(e => e.id === r.id));
-  await chrome.storage.local.set({ runs: kept });
-}
-
-async function publish(progress, extra = {}, storage = {}) {
-  const { run } = progress;
-  const { runs = [] } = await chrome.storage.local.get("runs");
-  const summary = { ...run };
-  delete summary.results;
-  const previous = await chrome.storage.local.get("status");
-  const nextStatus = { ...previous.status, ...summary, saved: run.created + run.updated,
-    skipped: run.unchanged + run.stale + run.checkpointSkipped, changedAt: Date.now(), ...extra };
-  await chrome.storage.local.set({
-    ...storage, [progress.key]: progress, [`run:${run.id}`]: run,
-    // The summary index changes only at task boundaries, not for every item.
-    ...(!runs.some(r => r.id === run.id) || !extra.running
-      ? { runs: [summary, ...runs.filter(r => r.id !== run.id)] } : {}), status: nextStatus,
-  });
+async function publish(progress, extra = {}, commands = []) {
+  await db.commit([db.put("progress", progress.key, progress), db.put("runs", progress.run.id, progress.run), ...commands]);
+  await status({ ...progress.run, saved: progress.run.created + progress.run.updated,
+    skipped: progress.run.unchanged + progress.run.stale + progress.run.checkpointSkipped, ...extra });
 }
 
 async function phase(progress, stage, title = null) {
@@ -86,13 +69,12 @@ async function phase(progress, stage, title = null) {
   await publish(progress, { running: true, error: null });
 }
 
-function result(progress, item, outcome, error = null) {
-  const record = { id: item.id, title: item.title || item.id, outcome, error, at: Date.now() };
-  // Retrying an item updates its result rather than adding a second checked item.
-  const index = progress.run.results.findIndex(r => r.id === item.id);
-  if (index >= 0) progress.run.results[index] = record;
-  else progress.run.results.push(record);
-  progress.run.failed = progress.run.results.filter(r => r.outcome === "failed").length;
+async function result(progress, item, outcome, error = null, timings = {}) {
+  const previous = await db.get("results", [progress.run.id, item.id]);
+  progress.run.failed = Math.max(0, (progress.run.failed || 0) - (previous?.outcome === "failed" ? 1 : 0) + (outcome === "failed" ? 1 : 0));
+  return db.put("results", [progress.run.id, item.id], {
+    taskId: progress.run.id, id: item.id, title: item.title || item.id, outcome, error, at: Date.now(), timings,
+  });
 }
 
 async function sync({ currentId = null, full = false, trigger = "manual", expectedAccount = null } = {}) {
@@ -104,10 +86,10 @@ async function sync({ currentId = null, full = false, trigger = "manual", expect
   try {
     const config = await settings();
     if (config.paused && !currentId) return { paused: true };
-    const pointers = await chrome.storage.local.get(["activeProgress", "currentProgress"]);
+    const pointers = { activeProgress: await db.get("meta", "activeProgress"), currentProgress: await db.get("meta", "currentProgress") };
     pointer = currentId ? "currentProgress" : (pointers.currentProgress ? "currentProgress" : "activeProgress");
     const key = pointers[pointer];
-    if (key) progress = (await chrome.storage.local.get(key))[key];
+    if (key) progress = await db.get("progress", key);
     if (progress && !progress.run) {
       // Preserve old pagination; counters and task history begin with this upgrade.
       progress = { ...progress, legacy: true };
@@ -126,9 +108,9 @@ async function sync({ currentId = null, full = false, trigger = "manual", expect
           checked: progress?.legacy ? (progress.offset || 0) + (progress.index || 0) : 0,
           previouslyChecked: progress?.legacy ? (progress.offset || 0) + (progress.index || 0) : 0,
           account: legacyScope ? legacyScope[1] : null, storageId: legacyScope ? legacyScope[2] : null,
-          created: 0, updated: 0, unchanged: 0, stale: 0, checkpointSkipped: 0, failed: 0, results: [] } };
-      await publish(progress, { running: true }, { [pointer]: progress.key });
-      if (key && key !== progress.key) await chrome.storage.local.remove(key);
+          created: 0, updated: 0, unchanged: 0, stale: 0, checkpointSkipped: 0, failed: 0, detailsRead: 0, verificationUsed: 0 } };
+      await publish(progress, { running: true }, [db.put("meta", pointer, progress.key)]);
+      if (key && key !== progress.key) await db.commit([db.del("progress", key)]);
     }
     if (progress.expectedAccount && expectedAccount && progress.expectedAccount !== expectedAccount) {
       throw new Error("The pending task belongs to another account. Finish or discard it first.");
@@ -143,7 +125,7 @@ async function sync({ currentId = null, full = false, trigger = "manual", expect
     progress.run.port = config.port;
     progress.run.storagePath = info.storage_path;
     await phase(progress, "Checking ChatGPT login");
-    const auth = await login();
+    const auth = await login(wait => phase(progress, "Waiting for ChatGPT login retry", `${Math.ceil(wait / 1000)} seconds`));
     if ((progress.run.account && progress.run.account !== auth.account)
         || (progress.expectedAccount && progress.expectedAccount !== auth.account)
         || (expectedAccount && expectedAccount !== auth.account)) {
@@ -153,13 +135,14 @@ async function sync({ currentId = null, full = false, trigger = "manual", expect
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(config.token));
     const receiverId = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
     const checkpointKey = `checkpoints:${auth.account}:${config.port}:${receiverId}:${storageId}`;
-    const stored = await chrome.storage.local.get(checkpointKey);
-    const checkpoints = stored[checkpointKey] || {};
-    const { pending: legacyPending } = await chrome.storage.local.get("pending");
+    progress.run.checkpointScope = checkpointKey;
+    const verificationKey = `verification:${checkpointKey}`;
+    progress.run.verificationStart ??= await db.get("meta", verificationKey) || 0;
+    const legacyPending = await db.get("pending", "legacy");
     if (legacyPending && !stopRequested) {
       if (legacyPending.account !== auth.account) throw new Error("A pending snapshot belongs to another account. Sign in to that account to finish syncing.");
       await receiver(config, "/v1/chatgpt", legacyPending);
-      await chrome.storage.local.remove("pending");
+      await db.commit([db.del("pending", "legacy")]);
     }
     async function stopped() {
       if (!stopRequested) return false;
@@ -174,9 +157,10 @@ async function sync({ currentId = null, full = false, trigger = "manual", expect
         await phase(progress, "Getting conversation list");
         if (progress.currentId) { progress.items = [{ id: progress.currentId }]; progress.run.total = 1; }
         else {
-          const page = await listPage(auth.token, progress.offset);
+          const page = await listPage(auth.token, progress.offset, wait => phase(progress, "Waiting for ChatGPT list retry", `${Math.ceil(wait / 1000)} seconds`));
           progress.items = page.items;
           progress.run.total = page.total;
+          if (Number.isFinite(page.total) && progress.run.verificationStart >= page.total) progress.run.verificationStart = 0;
         }
         await publish(progress, { running: true });
       }
@@ -186,38 +170,60 @@ async function sync({ currentId = null, full = false, trigger = "manual", expect
         progress.run.currentId = item.id;
         await phase(progress, "Checking conversation", item.title || item.id);
         const updated = revision(item.update_time);
-        const checkpoint = checkpoints[item.id];
+        const checkpoint = await db.get("checkpoints", [checkpointKey, item.id]);
         const age = Date.now() - checkpoint?.checkedAt;
         let outcome;
         let body;
-        if (!progress.pending && !progress.full && !progress.currentId && updated > 0
-            && checkpoint?.revision === updated && age >= 0 && age < interval) {
+        let checkpointCommand;
+        const timings = {};
+        let pending = await db.get("pending", progress.key);
+        const verify = !pending && !progress.full && !progress.currentId && checkpoint?.revision === updated
+          && progress.offset + progress.index >= progress.run.verificationStart && age >= 24 * 3600000 && (progress.run.verificationUsed || 0) < 5;
+        if (!pending && !progress.full && !progress.currentId && updated > 0
+            && checkpoint?.revision === updated && age >= 0 && !verify) {
           outcome = "checkpointSkipped";
         } else {
-          if (!progress.pending) {
+          if (!pending) {
             await phase(progress, "Reading conversation", item.title || item.id);
-            body = await conversation(auth.token, item.id);
-            progress.pending = { schema_version: 1, account: auth.account,
+            const readStart = performance.now();
+            body = await conversation(auth.token, item.id, wait => phase(progress, "Waiting for ChatGPT retry", `${Math.ceil(wait / 1000)} seconds`));
+            timings.providerMs = performance.now() - readStart;
+            progress.run.detailsRead = (progress.run.detailsRead || 0) + 1;
+            if (verify) progress.run.verificationUsed = (progress.run.verificationUsed || 0) + 1;
+            progress.pendingVerificationPosition = verify ? progress.offset + progress.index : null;
+            pending = { schema_version: 1, account: auth.account,
               captured_at: new Date().toISOString(), conversation: body };
-            await publish(progress, { running: true });
+            const queueStart = performance.now();
+            await db.commit([db.put("pending", progress.key, pending), db.put("progress", progress.key, progress)]);
+            timings.queueMs = performance.now() - queueStart;
           }
-          body = progress.pending.conversation;
+          if (pending.account !== auth.account || pending.conversation.conversation_id !== item.id) throw new Error("Pending snapshot identity does not match the current task item.");
+          body = pending.conversation;
           if (await stopped()) return;
           await phase(progress, "Saving conversation", body.title || item.title || item.id);
-          const acknowledgement = await receiver(config, "/v1/chatgpt", progress.pending);
+          const uploadStart = performance.now();
+          const acknowledgement = await receiver(config, "/v1/chatgpt", pending);
+          timings.receiverMs = performance.now() - uploadStart;
+          timings.jsonSaveMs = acknowledgement.save_ms;
           if (!["created", "updated", "skipped", "stale"].includes(acknowledgement.status)) {
             throw new Error("Buddy did not confirm a recognized persistence result. Upgrade the receiver and retry.");
           }
           outcome = acknowledgement.status === "skipped" ? "unchanged" : acknowledgement.status;
-          checkpoints[item.id] = { revision: revision(body.update_time), checkedAt: Date.now() };
+          checkpointCommand = db.put("checkpoints", [checkpointKey, item.id], { revision: revision(body.update_time), checkedAt: Date.now() });
         }
         progress.run[outcome]++;
         progress.run.checked++;
-        result(progress, { ...item, title: body?.title || item.title }, outcome);
-        progress.pending = null;
+        const resultCommand = await result(progress, { ...item, title: body?.title || item.title }, outcome, null, timings);
+        const verificationCommand = progress.pendingVerificationPosition != null
+          ? db.put("meta", verificationKey, progress.pendingVerificationPosition + 1) : null;
+        progress.pendingVerificationPosition = null;
         progress.index++;
         // Persist the acknowledgement and cursor together before doing more work.
-        await publish(progress, { running: true }, { [checkpointKey]: checkpoints });
+        const commitStart = performance.now();
+        await publish(progress, { running: true }, [resultCommand, db.del("pending", progress.key), ...(checkpointCommand ? [checkpointCommand] : []), ...(verificationCommand ? [verificationCommand] : [])]);
+        timings.commitMs = performance.now() - commitStart;
+        await db.commit([resultCommand]);
+        await status({ commitMs: timings.commitMs });
       }
       if (await stopped()) return;
       if (progress.currentId || !progress.items.length ||
@@ -229,18 +235,23 @@ async function sync({ currentId = null, full = false, trigger = "manual", expect
     progress.run.stage = "Sync complete";
     progress.run.endedAt = Date.now();
     progress.run.currentTitle = null;
-    await publish(progress, { running: false, lastSync: new Date().toISOString(), retryAt: 0,
-      nextSync: Date.now() + interval, error: null });
-    await chrome.storage.local.remove([progress.key, pointer]);
-    await prune();
+    await db.commit([db.put("runs", progress.run.id, progress.run), db.del("progress", progress.key), db.del("meta", pointer),
+      ...(!progress.full && !progress.currentId && (progress.run.verificationUsed || 0) < 5 ? [db.put("meta", verificationKey, 0)] : [])]);
+    await db.prune(Date.now() - retention);
+    await status({ ...progress.run, running: false, saved: progress.run.created + progress.run.updated,
+      skipped: progress.run.unchanged + progress.run.stale + progress.run.checkpointSkipped,
+      lastSync: new Date().toISOString(), retryAt: 0, nextSync: Date.now() + interval, error: null });
+
   } catch (error) {
     const message = error.message || String(error);
     if (progress?.run) {
+      // A failed acknowledgement transaction must not publish an advanced in-memory cursor.
+      progress = await db.get("progress", progress.key) || progress;
       progress.run.state = "failed";
       progress.run.error = message;
       const item = progress.items?.[progress.index];
-      if (item) result(progress, { ...item, title: progress.run.currentTitle || item.title }, "failed", message);
-      await publish(progress, { running: false, error: message, retryAt: Date.now() + interval });
+      const failedResult = item ? await result(progress, { ...item, title: progress.run.currentTitle || item.title }, "failed", message) : null;
+      await publish(progress, { running: false, error: message, retryAt: Date.now() + interval }, failedResult ? [failedResult] : []);
     } else await status({ running: false, error: message, retryAt: Date.now() + interval });
   } finally { running = false; }
 }
@@ -253,7 +264,9 @@ async function setupAlarm() {
 async function tick() {
   const config = await settings();
   if (!config.token || config.paused || running) return;
-  const { activeProgress, currentProgress, status = {} } = await chrome.storage.local.get(["activeProgress", "currentProgress", "status"]);
+  const activeProgress = await db.get("meta", "activeProgress");
+  const currentProgress = await db.get("meta", "currentProgress");
+  const { status = {} } = await chrome.storage.local.get("status");
   if (activeProgress || currentProgress) {
     if (!status.retryAt || status.retryAt <= Date.now()) await sync({ trigger: "recovery" });
   } else if (!status.nextSync || status.nextSync <= Date.now()) await sync({ trigger: "scheduled" });
@@ -271,7 +284,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       const { port, token } = message;
       if (!Number.isInteger(port) || port < 1 || port > 65535 || !/^[a-f0-9]{64}$/i.test(token)) throw new Error("Use a valid port and the 64-character Buddy pairing token.");
       const config = await settings();
-      const { activeProgress, currentProgress } = await chrome.storage.local.get(["activeProgress", "currentProgress"]);
+      const activeProgress = await db.get("meta", "activeProgress");
+      const currentProgress = await db.get("meta", "currentProgress");
       if ((running || activeProgress || currentProgress) && (config.port !== port || config.token !== token)) {
         throw new Error("Finish or discard pending tasks before changing the connection.");
       }
@@ -291,32 +305,36 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     } else if (message.type === "discard") {
       if (running || !(await settings()).paused) throw new Error("Pause and wait for the current save to finish before discarding a task.");
       for (const pointer of ["activeProgress", "currentProgress"]) {
-        const key = (await chrome.storage.local.get(pointer))[pointer];
-        const progress = key && (await chrome.storage.local.get(key))[key];
+        const key = await db.get("meta", pointer);
+        const progress = key && await db.get("progress", key);
         if (progress?.run) {
           progress.run.state = "discarded";
           progress.run.endedAt = Date.now();
           progress.run.stage = "Task discarded; saved files retained";
           await publish(progress, { running: false, retryAt: 0, error: null });
         }
-        if (key) await chrome.storage.local.remove([key, pointer]);
+        if (key) await db.commit([db.del("progress", key), db.del("meta", pointer), db.del("pending", key)]);
       }
-      await chrome.storage.local.remove("pending");
+      await db.commit([db.del("pending", "legacy")]);
     } else if (message.type === "sync") {
       if (running) throw new Error("A sync is already running. Check the current task for progress.");
       if (message.currentId && !/^[a-zA-Z0-9_-]{1,128}$/.test(message.currentId)) throw new Error("Invalid conversation ID.");
       if (message.full) {
-        const { activeProgress } = await chrome.storage.local.get("activeProgress");
+        const activeProgress = await db.get("meta", "activeProgress");
         if (activeProgress) throw new Error("Finish or discard the pending history task before rechecking all history.");
       }
       const config = await settings();
       if (config.paused && !message.currentId) throw new Error("Resume automatic archiving before syncing history.");
       if (!running) void sync({ currentId: message.currentId || null, full: message.full === true,
         expectedAccount: message.account || null, trigger: "manual" });
+    } else if (message.type === "tasks") {
+      return { ok: true, data: await db.page("runs", { offset: Math.max(0, Number(message.offset) || 0), limit: 25 }) };
+    } else if (message.type === "taskResults") {
+      return { ok: true, data: await db.page("results", { taskId: String(message.taskId), offset: Math.max(0, Number(message.offset) || 0), limit: 25 }) };
     } else if (message.type === "archives") {
       const config = await settings();
       const query = new URLSearchParams({ q: String(message.q || ""), account: String(message.account || ""),
-        offset: String(Math.max(0, Number(message.offset) || 0)), limit: String(Math.min(100, Number(message.limit) || 50)) });
+        offset: String(Math.max(0, Number(message.offset) || 0)), limit: String(Math.min(100, Number(message.limit) || 50)), refresh: String(message.refresh === true) });
       return { ok: true, data: await receiver(config, `/v1/archives?${query}`) };
     } else if (message.type === "retryMarkdown") {
       return { ok: true, data: await receiver(await settings(), "/v1/archives/retry", { account: message.account, id: message.id }) };
@@ -334,7 +352,8 @@ const ready = (async () => {
     await chrome.storage.local.remove("autoSync");
   }
   await status({ running: false, state: previous.running ? "interrupted" : previous.state });
-  await prune();
+  await db.migrate();
+  await db.prune(Date.now() - retention);
   await setupAlarm();
 })();
 // Startup checks also cover an existing installation whose periodic alarm was absent.

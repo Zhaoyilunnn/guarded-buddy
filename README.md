@@ -82,7 +82,9 @@ Run `buddy web serve`, copy the token from `buddy web pair`, and load
 The extension starts archiving after pairing and checks history automatically
 every 15 minutes using your existing browser login. Its popup shows progress and
 recent archives; the archive manager provides searchable saved conversations,
-file paths, Markdown status, and persistent sync-task history. Automatic work can
+file paths, Markdown status, and persistent sync-task history. Pending snapshots
+are queued once and removed after receiver acknowledgement; task results use
+paged IndexedDB records, and archive queries use a background-maintained index. Automatic work can
 be paused and resumed; current-conversation saves remain available while paused.
 
 With `[sync].path` configured, the receiver saves directly to

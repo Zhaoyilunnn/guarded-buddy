@@ -182,16 +182,35 @@ fn snapshot_date(snapshot: &Snapshot) -> anyhow::Result<String> {
 }
 
 fn save_dated(dir: &Path, snapshot: &Snapshot) -> anyhow::Result<&'static str> {
+    save_dated_at(dir, snapshot, None)
+}
+
+fn save_dated_at(
+    dir: &Path,
+    snapshot: &Snapshot,
+    candidates: Option<Vec<PathBuf>>,
+) -> anyhow::Result<&'static str> {
     let mut latest = snapshot.clone();
     let mut obsolete = Vec::new();
     let filename = format!("{}.json", snapshot.id());
     let legacy = dir.join(snapshot.id());
-    for entry in walkdir::WalkDir::new(dir).follow_links(false) {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().is_none_or(|ext| ext != "json")
-            || (entry.file_name() != filename.as_str() && !path.starts_with(&legacy))
-        {
+    let paths = match candidates {
+        Some(paths) => paths,
+        None => {
+            let mut paths = Vec::new();
+            for entry in walkdir::WalkDir::new(dir).follow_links(false) {
+                let entry = entry?;
+                if entry.path().extension().is_some_and(|ext| ext == "json")
+                    && (entry.file_name() == filename.as_str() || entry.path().starts_with(&legacy))
+                {
+                    paths.push(entry.into_path());
+                }
+            }
+            paths
+        }
+    };
+    for path in &paths {
+        if !path.exists() {
             continue;
         }
         let old = read_snapshot(path)?;
@@ -347,6 +366,7 @@ struct MarkdownWorker {
     jobs: std::sync::mpsc::Sender<Option<PathBuf>>,
     thread: Option<std::thread::JoinHandle<()>>,
     errors: Arc<Mutex<std::collections::HashMap<PathBuf, String>>>,
+    stages: Arc<Mutex<std::collections::HashMap<PathBuf, (String, f64)>>>,
 }
 
 fn markdown_needed(path: &Path) -> bool {
@@ -367,6 +387,8 @@ impl MarkdownWorker {
         let (jobs, receive) = std::sync::mpsc::channel::<Option<PathBuf>>();
         let errors = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let worker_errors = errors.clone();
+        let stages = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let worker_stages = stages.clone();
         let thread = std::thread::spawn(move || {
             let mut pending = std::collections::HashSet::new();
             for entry in walkdir::WalkDir::new(&root).follow_links(false) {
@@ -385,7 +407,18 @@ impl MarkdownWorker {
             loop {
                 let mut failed = std::collections::HashSet::new();
                 for path in pending.drain() {
+                    let started = std::time::Instant::now();
+                    if let Ok(mut stages) = worker_stages.lock() {
+                        stages.insert(path.clone(), ("generating".into(), 0.0));
+                    }
                     if let Err(error) = export_markdown(&root, &path) {
+                        if error.downcast_ref::<MarkdownSuperseded>().is_some() {
+                            if let Ok(mut stages) = worker_stages.lock() {
+                                stages.insert(path.clone(), ("queued".into(), 0.0));
+                            }
+                            failed.insert(path);
+                            continue;
+                        }
                         eprintln!(
                             "Markdown conversion failed for {}: {error:#}",
                             path.display()
@@ -393,9 +426,21 @@ impl MarkdownWorker {
                         if let Ok(mut errors) = worker_errors.lock() {
                             errors.insert(path.clone(), error.to_string());
                         }
+                        if let Ok(mut stages) = worker_stages.lock() {
+                            stages.insert(
+                                path.clone(),
+                                ("failed".into(), started.elapsed().as_secs_f64() * 1000.0),
+                            );
+                        }
                         failed.insert(path);
                     } else if let Ok(mut errors) = worker_errors.lock() {
                         errors.remove(&path);
+                        if let Ok(mut stages) = worker_stages.lock() {
+                            stages.insert(
+                                path.clone(),
+                                ("ready".into(), started.elapsed().as_secs_f64() * 1000.0),
+                            );
+                        }
                     }
                 }
                 pending = failed;
@@ -427,6 +472,7 @@ impl MarkdownWorker {
         Self {
             jobs,
             errors,
+            stages,
             thread: Some(thread),
         }
     }
@@ -441,6 +487,10 @@ impl Drop for MarkdownWorker {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("snapshot changed during Markdown rendering; queued for retry")]
+struct MarkdownSuperseded;
+
 fn export_markdown(root: &Path, path: &Path) -> anyhow::Result<()> {
     let snapshot = match read_snapshot(path) {
         Ok(snapshot) => snapshot,
@@ -452,11 +502,14 @@ fn export_markdown(root: &Path, path: &Path) -> anyhow::Result<()> {
         bail!("snapshot account does not match its path");
     }
     let _lock = account_lock(&account)?;
-    // Re-read under the writer lock so a delayed conversion cannot publish an old revision.
+    // Read a stable version, then release the writer lock while rendering.
     if !path.exists() {
         return Ok(());
     }
     let snapshot = read_snapshot(path)?;
+    let source_meta = std::fs::metadata(path)?;
+    let source_time = source_meta.modified()?;
+    drop(_lock);
     let session = crate::sources::chatgpt::parse(&snapshot).map_err(anyhow::Error::msg)?;
     let title = snapshot.conversation["title"]
         .as_str()
@@ -475,6 +528,14 @@ fn export_markdown(root: &Path, path: &Path) -> anyhow::Result<()> {
             message.timestamp.to_rfc3339(),
             message.text().unwrap_or("")
         ));
+    }
+    let _lock = account_lock(&account)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let latest_meta = std::fs::metadata(path)?;
+    if latest_meta.modified()? != source_time || latest_meta.len() != source_meta.len() {
+        return Err(MarkdownSuperseded.into());
     }
     let destination = path.with_extension("md");
     if std::fs::symlink_metadata(&destination)
@@ -515,6 +576,9 @@ struct Receiver {
     markdown: std::sync::mpsc::Sender<Option<PathBuf>>,
     markdown_errors: Arc<Mutex<std::collections::HashMap<PathBuf, String>>>,
     catalog: Arc<Mutex<ArchiveCache>>,
+    catalog_requests: std::sync::mpsc::Sender<Option<()>>,
+    snapshot_index: Arc<Mutex<SnapshotIndex>>,
+    markdown_stages: Arc<Mutex<std::collections::HashMap<PathBuf, (String, f64)>>>,
 }
 
 fn authorized(headers: &HeaderMap, receiver: &Receiver) -> bool {
@@ -554,11 +618,18 @@ async fn ingest(
             "receiver lock failed".into(),
         )
     })?;
-    let status = match &receiver.archive {
-        Some(archive) => save_shared_snapshot(archive, &snapshot),
-        None => save_snapshot(&receiver.home, &snapshot),
-    }
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let started = std::time::Instant::now();
+    let status = receiver
+        .snapshot_index
+        .lock()
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "snapshot index lock failed".into(),
+            )
+        })?
+        .save(&receiver.root(), &snapshot)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if status != "stale" {
         let root = receiver
             .archive
@@ -576,7 +647,11 @@ async fn ingest(
             eprintln!("Markdown worker unavailable; restart the receiver to backfill saved JSON");
         }
     }
-    Ok(Json(json!({"status": status})))
+    let save_ms = started.elapsed().as_secs_f64() * 1000.0;
+    receiver
+        .update_catalog(&snapshot, status)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(json!({"status": status, "save_ms": save_ms})))
 }
 
 async fn health(
@@ -600,9 +675,147 @@ async fn health(
     ))
 }
 
+// Account directory stamps detect new/moved files without walking every file on each save.
+#[derive(Default)]
+struct AccountIndex {
+    paths: std::collections::HashMap<String, Vec<PathBuf>>,
+    directories: std::collections::HashMap<PathBuf, std::time::SystemTime>,
+}
+#[derive(Default)]
+struct SnapshotIndex {
+    accounts: std::collections::HashMap<String, AccountIndex>,
+    scans: usize,
+}
+impl SnapshotIndex {
+    fn save(&mut self, root: &Path, snapshot: &Snapshot) -> anyhow::Result<&'static str> {
+        let dir = private_dir(root, Path::new(&snapshot.account))?;
+        let _lock = account_lock(&dir)?;
+        let valid = self.accounts.get(&snapshot.account).is_some_and(|index| {
+            index.directories.iter().all(|(p, t)| {
+                std::fs::symlink_metadata(p).is_ok_and(|m| {
+                    m.is_dir()
+                        && !m.file_type().is_symlink()
+                        && m.modified().ok().as_ref() == Some(t)
+                })
+            })
+        });
+        if !valid {
+            let mut index = AccountIndex::default();
+            for entry in walkdir::WalkDir::new(&dir).follow_links(false) {
+                let entry = entry?;
+                if entry.file_type().is_dir() {
+                    index
+                        .directories
+                        .insert(entry.path().into(), entry.metadata()?.modified()?);
+                } else if entry.path().extension().is_some_and(|x| x == "json")
+                    && let Some(id) = entry.path().file_stem().and_then(|x| x.to_str())
+                {
+                    index
+                        .paths
+                        .entry(id.to_owned())
+                        .or_default()
+                        .push(entry.path().into());
+                }
+            }
+            self.accounts.insert(snapshot.account.clone(), index);
+            self.scans += 1;
+        }
+        let index = self
+            .accounts
+            .get_mut(&snapshot.account)
+            .expect("account index initialized");
+        // Legacy per-conversation directories may contain hash-named snapshots.
+        let result = if dir.join(snapshot.id()).exists() {
+            save_dated(&dir, snapshot)?
+        } else {
+            save_dated_at(
+                &dir,
+                snapshot,
+                Some(index.paths.get(snapshot.id()).cloned().unwrap_or_default()),
+            )?
+        };
+        let candidate = dir
+            .join(snapshot_date(snapshot)?)
+            .join(format!("{}.json", snapshot.id()));
+        let paths = index.paths.entry(snapshot.id().into()).or_default();
+        paths.retain(|p| p.is_file());
+        if candidate.is_file() && !paths.contains(&candidate) {
+            paths.push(candidate.clone());
+        }
+        // Account for our own directory creation/removal before validating the next write.
+        for ancestor in candidate
+            .ancestors()
+            .skip(1)
+            .take_while(|p| p.starts_with(&dir))
+        {
+            if ancestor.is_dir() {
+                index
+                    .directories
+                    .insert(ancestor.into(), std::fs::metadata(ancestor)?.modified()?);
+            }
+        }
+        index.directories.retain(|p, _| p.is_dir());
+        for (path, time) in &mut index.directories {
+            *time = std::fs::metadata(path)?.modified()?;
+        }
+        Ok(result)
+    }
+}
+
+struct CatalogWorker {
+    stop: std::sync::mpsc::Sender<Option<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl CatalogWorker {
+    fn start(receiver: Receiver, receive: std::sync::mpsc::Receiver<Option<()>>) -> Self {
+        let stop = receiver.catalog_requests.clone();
+        let thread = std::thread::spawn(move || {
+            loop {
+                if let Err(error) = receiver.reconcile_catalog()
+                    && let Ok(mut cache) = receiver.catalog.lock()
+                {
+                    cache.warnings = vec![error.to_string()];
+                    cache.refreshing = false;
+                }
+                match receive.recv_timeout(std::time::Duration::from_secs(60)) {
+                    Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    _ => (),
+                }
+                let mut stopping = false;
+                for signal in receive.try_iter() {
+                    if signal.is_none() {
+                        stopping = true;
+                    }
+                }
+                if stopping {
+                    break;
+                }
+                if let Ok(mut cache) = receiver.catalog.lock() {
+                    cache.refreshing = true;
+                }
+            }
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+impl Drop for CatalogWorker {
+    fn drop(&mut self) {
+        let _ = self.stop.send(None);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 #[derive(Default)]
 struct ArchiveCache {
     entries: std::collections::HashMap<PathBuf, (std::time::SystemTime, u64, Value)>,
+    warnings: Vec<String>,
+    refreshing: bool,
+    checked_at: Option<String>,
 }
 
 impl Receiver {
@@ -613,23 +826,19 @@ impl Receiver {
             .unwrap_or_else(|| history_root(&self.home))
     }
 
-    fn archive_rows(&self) -> anyhow::Result<(Vec<Value>, Vec<String>)> {
-        // Cache only metadata, never conversation bodies. Reconcile with disk on every query.
-        let _writes = self
-            .writes
-            .lock()
-            .map_err(|_| anyhow::anyhow!("receiver lock failed"))?;
-        let mut cache = self
+    fn reconcile_catalog(&self) -> anyhow::Result<()> {
+        let original = self
             .catalog
             .lock()
-            .map_err(|_| anyhow::anyhow!("catalog lock failed"))?;
-        let errors = self
-            .markdown_errors
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Markdown lock failed"))?;
+            .map_err(|_| anyhow::anyhow!("catalog lock failed"))?
+            .entries
+            .clone();
+        let mut cache = ArchiveCache {
+            entries: original.clone(),
+            ..ArchiveCache::default()
+        };
         let root = self.root();
         let mut seen = std::collections::HashSet::new();
-        let mut rows = Vec::new();
         let mut warnings = Vec::new();
         for entry in walkdir::WalkDir::new(&root).follow_links(false) {
             let entry = match entry {
@@ -644,7 +853,7 @@ impl Receiver {
                 continue;
             }
             let path = entry.path().to_path_buf();
-            let result = (|| -> anyhow::Result<Value> {
+            let result = (|| -> anyhow::Result<()> {
                 let meta = entry.metadata()?;
                 let modified = meta.modified()?;
                 if cache
@@ -668,29 +877,133 @@ impl Receiver {
                         .entries
                         .insert(path.clone(), (modified, meta.len(), row));
                 }
-                let mut row = cache.entries[&path].2.clone();
-                let needed = markdown_needed(&path);
-                row["markdown_status"] = json!(if !needed {
-                    "ready"
-                } else if errors.contains_key(&path) {
-                    "failed"
-                } else {
-                    "pending"
-                });
-                row["markdown_error"] = if needed {
-                    json!(errors.get(&path))
-                } else {
-                    Value::Null
-                };
-                Ok(row)
+                Ok(())
             })();
             seen.insert(path);
             match result {
-                Ok(row) => rows.push(row),
-                Err(error) => warnings.push(format!("{}: {error}", entry.path().display())),
+                Ok(()) => (),
+                Err(error) => {
+                    cache.entries.remove(entry.path());
+                    warnings.push(format!("{}: {error}", entry.path().display()));
+                }
             }
         }
         cache.entries.retain(|path, _| seen.contains(path));
+        let mut live = self
+            .catalog
+            .lock()
+            .map_err(|_| anyhow::anyhow!("catalog lock failed"))?;
+        let mut external_accounts = std::collections::HashSet::new();
+        for path in original.keys().chain(cache.entries.keys()) {
+            if original.get(path) != cache.entries.get(path)
+                && live.entries.get(path) == original.get(path)
+                && let Some(account) = cache
+                    .entries
+                    .get(path)
+                    .or_else(|| original.get(path))
+                    .and_then(|(_, _, r)| r["account"].as_str())
+            {
+                external_accounts.insert(account.to_owned());
+            }
+        }
+        // Preserve writes published while the disk scan was in progress.
+        for path in original.keys() {
+            if !live.entries.contains_key(path) {
+                cache.entries.remove(path);
+            }
+        }
+        for (path, entry) in &live.entries {
+            if original.get(path) != Some(entry) {
+                cache.entries.insert(path.clone(), entry.clone());
+            }
+        }
+        live.entries = cache.entries;
+        live.warnings = warnings;
+        live.refreshing = false;
+        live.checked_at = Some(chrono::Utc::now().to_rfc3339());
+        let live_paths: std::collections::HashSet<_> = live.entries.keys().cloned().collect();
+        drop(live);
+        if !external_accounts.is_empty() {
+            let mut index = self
+                .snapshot_index
+                .lock()
+                .map_err(|_| anyhow::anyhow!("snapshot index lock failed"))?;
+            for account in external_accounts {
+                index.accounts.remove(&account);
+            }
+        }
+        self.markdown_errors
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Markdown lock failed"))?
+            .retain(|p, _| live_paths.contains(p));
+        self.markdown_stages
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Markdown lock failed"))?
+            .retain(|p, _| live_paths.contains(p));
+        Ok(())
+    }
+
+    fn update_catalog(&self, snapshot: &Snapshot, status: &str) -> anyhow::Result<()> {
+        if status == "stale" {
+            return Ok(());
+        }
+        let root = self.root();
+        let path = root
+            .join(&snapshot.account)
+            .join(snapshot_date(snapshot)?)
+            .join(format!("{}.json", snapshot.id()));
+        if !path.is_file() {
+            return Ok(());
+        }
+        if status == "skipped"
+            && self
+                .catalog
+                .lock()
+                .map_err(|_| anyhow::anyhow!("catalog lock failed"))?
+                .entries
+                .contains_key(&path)
+        {
+            return Ok(());
+        }
+        let stored_snapshot;
+        let stored = if status == "skipped" {
+            stored_snapshot = read_snapshot(&path)?;
+            &stored_snapshot
+        } else {
+            snapshot
+        };
+        let meta = std::fs::metadata(&path)?;
+        let row = json!({"id": stored.id(), "account": stored.account,
+            "title": stored.conversation["title"].as_str().unwrap_or("Untitled"),
+            "url": format!("https://chatgpt.com/c/{}", stored.id()),
+            "updated_at": stored.revision(), "captured_at": stored.captured_at,
+            "saved_at": chrono::DateTime::<chrono::Utc>::from(meta.modified()?),
+            "path": path, "markdown_path": path.with_extension("md")});
+        let mut cache = self
+            .catalog
+            .lock()
+            .map_err(|_| anyhow::anyhow!("catalog lock failed"))?;
+        cache
+            .entries
+            .retain(|_, (_, _, r)| r["account"] != stored.account || r["id"] != stored.id());
+        cache
+            .entries
+            .insert(path, (meta.modified()?, meta.len(), row));
+        Ok(())
+    }
+
+    fn archive_rows(&self) -> anyhow::Result<(Vec<Value>, Vec<String>)> {
+        let cache = self
+            .catalog
+            .lock()
+            .map_err(|_| anyhow::anyhow!("catalog lock failed"))?;
+        let mut rows: Vec<_> = cache
+            .entries
+            .values()
+            .map(|(_, _, row)| row.clone())
+            .collect();
+        let warnings = cache.warnings.clone();
+        drop(cache);
         rows.sort_by(|a, b| {
             b["saved_at"]
                 .as_str()
@@ -698,6 +1011,36 @@ impl Receiver {
                 .then_with(|| a["path"].as_str().cmp(&b["path"].as_str()))
         });
         Ok((rows, warnings))
+    }
+
+    fn decorate_markdown(&self, row: &mut Value) {
+        let Some(path) = row["path"].as_str().map(PathBuf::from) else {
+            return;
+        };
+        let needed = markdown_needed(&path);
+        let errors = self
+            .markdown_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let stages = self
+            .markdown_stages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        row["markdown_status"] = json!(if !needed {
+            "ready"
+        } else if errors.contains_key(&path) {
+            "failed"
+        } else if stages.get(&path).is_some_and(|s| s.0 == "generating") {
+            "generating"
+        } else {
+            "queued"
+        });
+        row["markdown_error"] = if needed {
+            json!(errors.get(&path))
+        } else {
+            Value::Null
+        };
+        row["markdown_ms"] = json!(stages.get(&path).map(|s| s.1));
     }
 }
 
@@ -710,6 +1053,8 @@ struct ArchiveQuery {
     #[serde(default)]
     offset: usize,
     limit: Option<usize>,
+    #[serde(default)]
+    refresh: bool,
 }
 
 async fn archives(
@@ -724,6 +1069,10 @@ async fn archives(
         ));
     }
     tokio::task::spawn_blocking(move || {
+        if query.refresh {
+            receiver.catalog.lock().map_err(|_| anyhow::anyhow!("catalog lock failed"))?.refreshing = true;
+            let _ = receiver.catalog_requests.send(Some(()));
+        }
         let (rows, warnings) = receiver.archive_rows()?;
         let accounts: std::collections::BTreeSet<_> = rows
             .iter()
@@ -742,13 +1091,15 @@ async fn archives(
             })
             .collect();
         let total = rows.len();
-        let items: Vec<_> = rows
+        let mut items: Vec<_> = rows
             .into_iter()
             .skip(query.offset)
             .take(query.limit.unwrap_or(50).clamp(1, 100))
             .collect();
+        for row in &mut items { receiver.decorate_markdown(row); }
+        let cache = receiver.catalog.lock().map_err(|_| anyhow::anyhow!("catalog lock failed"))?;
         Ok::<_, anyhow::Error>(Json(
-            json!({"items": items, "total": total, "accounts": accounts, "warnings": warnings}),
+            json!({"items": items, "total": total, "accounts": accounts, "warnings": warnings, "refreshing": cache.refreshing, "checked_at": cache.checked_at}),
         ))
     })
     .await
@@ -872,6 +1223,7 @@ pub fn run(
             };
             eprintln!("ChatGPT storage: {}", root.display());
             let _markdown_worker = MarkdownWorker::start(root.clone());
+            let (catalog_requests, catalog_receive) = std::sync::mpsc::channel();
             let receiver = Receiver {
                 home,
                 archive: config.sync.path.clone(),
@@ -880,8 +1232,15 @@ pub fn run(
                 host: format!("127.0.0.1:{port}"),
                 markdown: _markdown_worker.jobs.clone(),
                 markdown_errors: _markdown_worker.errors.clone(),
-                catalog: Arc::new(Mutex::new(ArchiveCache::default())),
+                catalog: Arc::new(Mutex::new(ArchiveCache {
+                    refreshing: true,
+                    ..ArchiveCache::default()
+                })),
+                catalog_requests,
+                snapshot_index: Arc::new(Mutex::new(SnapshotIndex::default())),
+                markdown_stages: _markdown_worker.stages.clone(),
             };
+            let _catalog_worker = CatalogWorker::start(receiver.clone(), catalog_receive);
             tokio::runtime::Runtime::new()?.block_on(async {
                 let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
                 let router = Router::new().route("/health", get(health)).route("/v1/chatgpt", post(ingest))
@@ -1008,9 +1367,15 @@ mod tests {
             markdown: jobs,
             markdown_errors: Arc::new(Mutex::new(std::collections::HashMap::new())),
             catalog: Arc::new(Mutex::new(ArchiveCache::default())),
+            catalog_requests: std::sync::mpsc::channel().0,
+            snapshot_index: Arc::new(Mutex::new(SnapshotIndex::default())),
+            markdown_stages: Arc::new(Mutex::new(std::collections::HashMap::new())),
         };
         assert_eq!(
-            receiver.archive_rows().unwrap().0[0]["title"],
+            {
+                receiver.reconcile_catalog().unwrap();
+                receiver.archive_rows().unwrap().0[0]["title"].clone()
+            },
             "Before upgrade"
         );
         receiver
@@ -1019,19 +1384,32 @@ mod tests {
             .unwrap()
             .insert(path.clone(), "Conversion failed".into());
         assert_eq!(
-            receiver.archive_rows().unwrap().0[0]["markdown_status"],
+            {
+                receiver.reconcile_catalog().unwrap();
+                let mut row = receiver.archive_rows().unwrap().0.remove(0);
+                receiver.decorate_markdown(&mut row);
+                row["markdown_status"].clone()
+            },
             "failed"
         );
         export_markdown(&root, &path).unwrap();
         assert_eq!(
-            receiver.archive_rows().unwrap().0[0]["markdown_status"],
+            {
+                receiver.reconcile_catalog().unwrap();
+                let mut row = receiver.archive_rows().unwrap().0.remove(0);
+                receiver.decorate_markdown(&mut row);
+                row["markdown_status"].clone()
+            },
             "ready"
         );
         snapshot.conversation["title"] = json!("Renamed conversation");
         snapshot.captured_at = chrono::Utc::now();
         save_snapshot(home.path(), &snapshot).unwrap();
         assert_eq!(
-            receiver.archive_rows().unwrap().0[0]["title"],
+            {
+                receiver.reconcile_catalog().unwrap();
+                receiver.archive_rows().unwrap().0[0]["title"].clone()
+            },
             "Renamed conversation"
         );
         export_markdown(&root, &path).unwrap();
@@ -1042,10 +1420,91 @@ mod tests {
         export_markdown(&root, &path).unwrap();
         assert!(!markdown_needed(&path));
         std::fs::write(root.join("invalid.json"), "broken").unwrap();
+        receiver.reconcile_catalog().unwrap();
         assert_eq!(receiver.archive_rows().unwrap().1.len(), 1);
         std::fs::remove_file(&path).unwrap();
+        receiver.reconcile_catalog().unwrap();
         assert!(receiver.archive_rows().unwrap().0.is_empty());
         assert!(receiver.catalog.lock().unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn indexed_saves_reuse_paths_and_detect_external_moves() {
+        let root = tempfile::tempdir().unwrap();
+        let mut index = SnapshotIndex::default();
+        let mut snapshot = Snapshot {
+            schema_version: 1,
+            account: "a".repeat(64),
+            captured_at: chrono::Utc::now(),
+            conversation: json!({"conversation_id": "one", "title": "Example", "update_time": 1700000000,
+                "current_node": "a", "mapping": {"a": {"parent": null, "message": {"author": {"role": "user"},
+                    "create_time": 1700000000, "content": {"parts": ["Hello"]}}}}}),
+        };
+        assert_eq!(index.save(root.path(), &snapshot).unwrap(), "created");
+        let scans = index.scans;
+        for _ in 0..20 {
+            assert_eq!(index.save(root.path(), &snapshot).unwrap(), "skipped");
+        }
+        assert_eq!(
+            index.scans, scans,
+            "unchanged directory stamps avoid repeated full walks"
+        );
+        let old = snapshot.clone();
+        snapshot.conversation["update_time"] = json!(1700259200);
+        snapshot.conversation["title"] = json!("External newer version");
+        let dir = root.path().join(&snapshot.account);
+        let _lock = account_lock(&dir).unwrap();
+        save_dated(&dir, &snapshot).unwrap();
+        drop(_lock);
+        assert_eq!(index.save(root.path(), &old).unwrap(), "stale");
+        assert!(
+            index.scans > scans,
+            "an external move invalidates directory stamps"
+        );
+        let path = dir.join(snapshot_date(&snapshot).unwrap()).join("one.json");
+        assert_eq!(
+            read_snapshot(&path).unwrap().conversation["title"],
+            "External newer version"
+        );
+        snapshot.conversation["conversation_id"] = json!("two");
+        assert_eq!(index.save(root.path(), &snapshot).unwrap(), "created");
+        assert!(
+            path.is_file(),
+            "saving another conversation cannot replace the previous one"
+        );
+    }
+
+    #[test]
+    fn archive_queries_and_reconciliation_do_not_take_the_writer_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let receiver = Receiver {
+            home: home.path().into(),
+            archive: None,
+            token: "b".repeat(64),
+            host: "127.0.0.1:1".into(),
+            writes: Arc::new(Mutex::new(())),
+            markdown: std::sync::mpsc::channel().0,
+            markdown_errors: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            markdown_stages: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            catalog: Arc::new(Mutex::new(ArchiveCache::default())),
+            snapshot_index: Arc::new(Mutex::new(SnapshotIndex::default())),
+            catalog_requests: std::sync::mpsc::channel().0,
+        };
+        std::fs::create_dir_all(receiver.root()).unwrap();
+        let guard = receiver.writes.lock().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let copy = receiver.clone();
+        let thread = std::thread::spawn(move || {
+            copy.reconcile_catalog().unwrap();
+            send.send(copy.archive_rows().unwrap()).unwrap();
+        });
+        let result = receive.recv_timeout(std::time::Duration::from_secs(2));
+        drop(guard);
+        thread.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "catalog IO must proceed independently of conversation writes"
+        );
     }
 
     #[test]

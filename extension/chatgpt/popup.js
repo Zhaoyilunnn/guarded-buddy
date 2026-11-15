@@ -14,7 +14,7 @@ function render() {
     : task.running ? "Runs every 15 minutes · Continues in the background"
     : task.error ? `Retry after ${date(task.retryAt)}` : `Next check: ${date(task.nextSync || Date.now())}`;
   $("taskTitle").textContent = task.running ? task.stage : labels[task.state] || "Waiting for first sync";
-  $("taskDetail").textContent = task.id ? `${task.checked || 0}${Number.isFinite(task.total) ? ` / ${task.total}` : ""} checked${task.previouslyChecked ? ` (${task.previouslyChecked} before update)` : ""}${task.failed ? ` · ${task.failed} failed` : ""} · ${task.endedAt ? `Finished ${date(task.endedAt)}` : `Started ${date(task.startedAt)}`}` : "Connect to begin archiving.";
+  $("taskDetail").textContent = task.id ? `${task.checked || 0}${Number.isFinite(task.total) ? ` / ${task.total}` : ""} checked · ${task.detailsRead || 0} details read${task.previouslyChecked ? ` (${task.previouslyChecked} before update)` : ""}${task.failed ? ` · ${task.failed} failed` : ""} · ${task.endedAt ? `Finished ${date(task.endedAt)}` : `Started ${date(task.startedAt)}`}` : "Connect to begin archiving.";
   $("progress").hidden = !task.running;
   if (Number.isFinite(task.total) && task.total > 0) {
     $("progress").max = task.total;
@@ -28,6 +28,7 @@ function render() {
   $("activity").textContent = task.running ? `Last progress: ${date(task.changedAt)}`
     : task.lastSync ? `Last successful sync: ${date(task.lastSync)}` : "No successful sync recorded yet.";
   $("sync").disabled = Boolean(task.running || paused);
+  $("sync").textContent = task.running ? "Syncing…" : "Sync now";
   $("current").disabled = Boolean(task.running);
   $("full").disabled = Boolean(task.running || paused);
   $("discard").disabled = Boolean(task.running || !paused);

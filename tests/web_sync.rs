@@ -646,6 +646,41 @@ fn receiver_and_cli_collect_enforce_auth_and_render_current_branch() {
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    let mut external = snapshot(200.0, "External archive");
+    external.conversation["conversation_id"] = json!("external-conversation");
+    buddy::web::save_shared_snapshot(archive.path(), &external).unwrap();
+    catalog("?refresh=true");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let listing = catalog("");
+        if listing["total"] == 2 && listing["refreshing"] == false {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background catalog refresh did not discover external files"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let external_path = catalog("?q=Architecture")["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "external-conversation")
+        .unwrap()["path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    std::fs::remove_file(external_path).unwrap();
+    catalog("?refresh=true");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while catalog("")["total"] != 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background refresh did not remove a deleted file"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     assert_cmd::Command::new(assert_cmd::cargo::cargo_bin!("buddy"))
         .env("HOME", home.path())
         .args([

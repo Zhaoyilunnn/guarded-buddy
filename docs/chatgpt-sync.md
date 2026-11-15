@@ -168,10 +168,14 @@ WSL automatically when Windows starts.
 
 After updating the repository, run `cargo install --path .`, restart the running
 `buddy web serve` process (or its systemd service), and reload the unpacked
-extension in `chrome://extensions`. Version 0.2.0 needs the updated receiver for
+extension in `chrome://extensions`. Version 0.3.0 needs the updated receiver for
 archive browsing and Markdown status. Existing JSON files remain the archive
 source; existing extension pagination and pending delivery are recovered when
-possible. Recovered legacy tasks identify items checked before the update; their
+possible. Version 0.3.0 transactionally imports old browser queues, progress,
+checkpoints, and task results into IndexedDB, then removes the old copies. A
+failed or interrupted import retains the source data and can resume without
+overwriting already imported records. Settings and explicit pauses are preserved.
+Recovered legacy tasks identify items checked before the update; their
 earlier per-item outcomes are unavailable. Explicit pauses made in this version survive subsequent reloads.
 
 ## Storage and report behavior
@@ -196,10 +200,13 @@ original link, creation/update timestamps, and visible messages on the current
 branch. Non-text attachments are not reconstructed. Cross-date updates remove
 the old Markdown and generate it beside the latest JSON. JSON remains the source
 for reports. The sync response confirms JSON persistence; it does not indicate
-Markdown completion. The archive manager shows Markdown as generating, ready, or failed independently
+Markdown completion. The archive manager shows Markdown as queued, generating, ready, or failed independently
 of JSON persistence. Failed conversions can be queued again with **Retry Markdown**;
 the worker also retries automatically. Cloud-client upload completion is outside
-the receiver’s visibility.
+the receiver’s visibility. Rendering runs outside the account writer lock;
+publication checks the source file version under that lock and queues a retry
+if JSON changed during rendering. The lock still protects source capture and
+atomic publication, so large source reads can briefly contend with a JSON save.
 
 No separate `buddy sync` is needed to publish browser captures to that directory.
 Without `[sync].path`, the receiver writes to
@@ -286,7 +293,10 @@ Only one sync executes at a time.
   ignored older revisions; task details distinguish these outcomes. A failed
   item is replaced by its eventual result when retried. Task details contain
   metadata, not conversation bodies or credentials, and remain in extension-local
-  storage for 90 days after completion or discard. Unfinished tasks remain until
+  IndexedDB for 90 days after completion or discard. Both tasks and results use
+  25-item pages. Results include ChatGPT read, queue write, receiver request,
+  receiver JSON-save, and local acknowledgement-commit timings when available.
+  Timing data can be partial for recovered items; it is not invented for earlier work. Unfinished tasks remain until
   completed or discarded. Uninstalling the extension removes these task records,
   but the disk archive remains discoverable after reconnecting. Older task
   history cannot be reconstructed; recording starts with the upgrade.
@@ -294,9 +304,16 @@ Only one sync executes at a time.
 Settings hold the pairing credential and receiver port. Receiver details show the
 actual storage directory and whether an archive directory is configured. A cloud
 client may replicate either directory; Buddy confirms local persistence only.
-The archive list caches metadata in receiver memory and reconciles file changes
-on each query; unreadable files produce visible warnings rather than disappearing
-silently.
+The archive list queries a metadata index in receiver memory. A background scan
+builds it at startup and reconciles external file changes every 60 seconds.
+Successful local writes update their index entries immediately. **Refresh** asks
+for a background disk check while serving the last available index; the manager
+polls until that check finishes. Scan warnings and an in-progress indication are
+visible. Queries and disk scans do not take the conversation writer lock.
+Normal saves use an account path index; directory timestamp changes invalidate
+it and trigger rediscovery so externally added or moved files can be compared.
+The index accelerates lookup; revision comparison and atomic writes remain the
+source of truth.
 
 **More** contains **Recheck all history** and **Discard unfinished tasks**.
 Discard requires pausing and waiting for the current operation to finish. It
@@ -309,18 +326,30 @@ settings cannot change while unfinished work exists.
 ## Incremental sync and recovery
 
 - **Sync now** compares list update timestamps with locally acknowledged
-  revisions, fetching details for changed or unrecognized conversations. Matching
-  checkpoints expire after 15 minutes, so later syncs recheck details even when
-  the provider's list timestamp does not reflect a content change. Provider
-  requests bypass the browser HTTP cache. Older extension checkpoints without a
-  verification time are rechecked once after upgrading.
+  revisions and reads details for changed or unrecognized conversations. Matching
+  unchanged conversations are skipped during ordinary 15-minute checks. To catch
+  content changes absent from list timestamps, each history task verifies at most
+  five unchanged conversations last verified at least 24 hours ago. A persistent
+  list-position cursor rotates this budget, wrapping at the end so earlier entries
+  cannot permanently consume it. Thus verification latency grows with archive
+  size; use a current-conversation save or full recheck for immediate verification.
+  Provider requests bypass the browser HTTP cache. Legacy checkpoints without a
+  verification time are revalidated once. The popup distinguishes list entries
+  checked from conversation details actually read, and exposes provider backoff.
 - **Recheck all history** fetches every listed conversation regardless of the
   checkpoint. Use it after restoring/deleting the local archive or if a provider
   update timestamp failed to reflect a change. Saving the current conversation
   also bypasses the checkpoint.
-- A snapshot is queued in extension-local storage before delivery. The receiver
-  writes through a temporary file and acknowledges only after replacing the live
-  JSON file. Unchanged content is skipped and older provider revisions are ignored.
+- A complete snapshot is written once to an independent IndexedDB pending record
+  before delivery. Stage updates never include the payload or earlier item
+  results. The receiver acknowledges durable JSON persistence. One IndexedDB
+  transaction then advances the cursor, updates the checkpoint, writes the single
+  item result, and deletes the pending snapshot. A failed transaction retains the
+  old cursor and queued body for idempotent replay. Settings and a small UI status
+  remain in `chrome.storage.local`; task summaries, results, progress, queues, and
+  per-conversation checkpoints are separate database records. Timing updates
+  modify only the current result. Unchanged content is skipped and older provider
+  revisions are ignored.
 - Pagination position and per-conversation acknowledgements are scoped to the
   receiver's storage identity and survive extension worker suspension. Changing
   the storage directory starts fresh checkpoints, so a previous destination's
@@ -367,8 +396,8 @@ The local protocol exposes these authenticated endpoints:
 | Endpoint | Behavior |
 | --- | --- |
 | `GET /health` | Returns `app: "buddy"`, `schema_version: 1`, and `storage_id` (a digest identifying the storage directory), `storage_path`, `shared_directory`, and `catalog_version: 1` |
-| `POST /v1/chatgpt` | Accepts `schema_version`, `account`, `captured_at`, and `conversation`; returns `status` (`created`, `updated`, `skipped`, or `stale`) |
-| `GET /v1/archives` | Returns metadata from disk; accepts `q` (case-insensitive title search), `account`, `offset`, and `limit` (default 50, maximum 100); returns `items`, filtered `total`, all account namespaces, and scan `warnings` |
+| `POST /v1/chatgpt` | Accepts `schema_version`, `account`, `captured_at`, and `conversation`; returns `status` (`created`, `updated`, `skipped`, or `stale`) and `save_ms` |
+| `GET /v1/archives` | Returns cached disk metadata; accepts `q` (case-insensitive title search), `account`, `offset`, and `limit` (default 50, maximum 100); `refresh=true` queues a disk reconciliation; returns `items`, filtered `total`, account namespaces, `warnings`, `refreshing`, and `checked_at` |
 | `POST /v1/archives/retry` | Accepts `account` and `id` for an existing archive; queues Markdown conversion without accepting a caller-supplied filesystem path |
 
 ```mermaid
@@ -386,7 +415,7 @@ sequenceDiagram
     User->>Extension: Save current / Sync now / Pause or resume
     Extension->>Receiver: Authenticated health check
     Extension->>ChatGPT: Use browser login to list and fetch conversations
-    Extension->>Extension: Persist pending snapshot and pagination progress
+    Extension->>Extension: Insert independent pending snapshot once in IndexedDB
     Extension->>Receiver: POST /v1/chatgpt with receiver token
     alt sync.path configured
         Receiver->>Archive: Compare revision and atomically replace conversation JSON
@@ -394,7 +423,7 @@ sequenceDiagram
         Receiver->>Local: Compare revision and atomically replace conversation JSON
     end
     Receiver-->>Extension: Acknowledge saved / skipped / stale
-    Extension->>Extension: Persist task result, counters, checkpoint and next cursor
+    Extension->>Extension: Transactionally commit one result, checkpoint and cursor; delete pending snapshot
     User->>Extension: View archive and sync tasks
     Extension->>Receiver: Authenticated archive metadata query
     Receiver-->>Extension: Actual file paths and Markdown state
@@ -411,8 +440,9 @@ sequenceDiagram
 ```sh
 cargo test
 cargo clippy
-node extension/chatgpt/tests/api.test.js
-node extension/chatgpt/tests/background.test.js
+npm --prefix extension/chatgpt ci
+npm --prefix extension/chatgpt test
+node extension/chatgpt/tests/performance.test.js
 ```
 
 Rust integration tests exercise a real loopback receiver, authentication, atomic
@@ -423,3 +453,31 @@ restart, pause/resume, destination/account isolation, and persistent task result
 Receiver tests cover authenticated catalog search, pagination, disk reconciliation,
 conversion states, and retry validation. They do not
 replace a live test in an authenticated browser account.
+
+### Optional native browser verification
+
+The browser smoke test uses synthetic provider/receiver responses and a real
+Chromium IndexedDB database. Install Playwright in your test environment, then
+run:
+
+```sh
+node extension/chatgpt/tests/browser-smoke.cjs
+```
+
+If Playwright or Chromium are installed elsewhere, set `BUDDY_PLAYWRIGHT_MODULE`
+to the Playwright module path and `BUDDY_CHROMIUM_EXECUTABLE` to the browser binary.
+The test covers pending-queue migration, pause/resume, recovery without rewriting
+the queued body, history persistence across reloads, timing display, and safe
+rendering of conversation titles. It does not use a real ChatGPT login.
+
+### Storage performance regression
+
+The performance test instruments actual database-record writes with an IndexedDB
+emulator and measures serialized value sizes, rather than disk write amplification
+or network latency. For two forced full checks of eight synthetic 512 KiB
+snapshots, version 0.2.0 wrote approximately 16.3 MiB; version 0.3.0 writes about
+8.22 MiB, with one queue insertion per fetched snapshot and small phase records.
+The ordinary check 15 minutes later makes no detail requests for unchanged items.
+Tests also verify bounded old-detail rotation, acknowledgement rollback, expired
+result pruning, and restartable migration. These figures are a local regression
+budget, not a claim of a fixed end-to-end speedup on a real account.
