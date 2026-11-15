@@ -552,6 +552,100 @@ fn receiver_and_cli_collect_enforce_auth_and_render_current_branch() {
         post().send().unwrap().json::<serde_json::Value>().unwrap()["status"],
         "skipped"
     );
+    let info = client
+        .get(format!("{base}/health"))
+        .bearer_auth(&token)
+        .send()
+        .unwrap()
+        .json::<serde_json::Value>()
+        .unwrap();
+    assert_eq!(info["catalog_version"], 1);
+    assert_eq!(info["shared_directory"], true);
+    assert_eq!(
+        info["storage_path"],
+        archive.path().join("chatgpt").to_str().unwrap()
+    );
+    for endpoint in ["/v1/archives", "/v1/archives?q=Architecture"] {
+        assert_eq!(
+            client
+                .get(format!("{base}{endpoint}"))
+                .send()
+                .unwrap()
+                .status(),
+            401
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}{endpoint}"))
+                .bearer_auth(&token)
+                .header("Origin", "https://example.com")
+                .send()
+                .unwrap()
+                .status(),
+            401
+        );
+    }
+    let catalog = |query: &str| {
+        client
+            .get(format!("{base}/v1/archives{query}"))
+            .bearer_auth(&token)
+            .send()
+            .unwrap()
+            .json::<serde_json::Value>()
+            .unwrap()
+    };
+    let listing = catalog("?q=architecture&limit=1");
+    assert_eq!(listing["total"], 1);
+    assert_eq!(listing["items"][0]["title"], "Architecture discussion");
+    assert_eq!(listing["items"][0]["account"], payload.account);
+    assert!(
+        listing["items"][0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("conversation-1.json")
+    );
+    assert!(listing["items"][0].get("conversation").is_none());
+    assert_eq!(catalog("?q=not-present")["total"], 0);
+    assert_eq!(catalog("?offset=1")["items"].as_array().unwrap().len(), 0);
+    assert_eq!(catalog("?account=another-account")["total"], 0);
+    let item = json!({"account": payload.account, "id": payload.id()});
+    assert_eq!(
+        client
+            .post(format!("{base}/v1/archives/retry"))
+            .json(&item)
+            .send()
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/v1/archives/retry"))
+            .bearer_auth(&token)
+            .json(&item)
+            .send()
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/v1/archives/retry"))
+            .bearer_auth(&token)
+            .json(&json!({"account": "../outside", "id": "../../file"}))
+            .send()
+            .unwrap()
+            .status(),
+        404
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while catalog("")["items"][0]["markdown_status"] != "ready" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Markdown did not finish"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     assert_cmd::Command::new(assert_cmd::cargo::cargo_bin!("buddy"))
         .env("HOME", home.path())
         .args([

@@ -1,21 +1,38 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Buddy ChatGPT Sync</title><style>
-body { width: 340px; padding: 16px; font: 14px system-ui; color: #172033; background: #f6f8fc; }
-h1 { font-size: 18px; } label { display: block; margin: 12px 0; } input[type=text], input[type=password], input[type=number] { box-sizing: border-box; width: 100%; padding: 7px; margin-top: 4px; }
-button { padding: 8px; margin: 4px 0; cursor: pointer; } pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-</style></head>
-<body>
-<h1>Buddy · ChatGPT</h1>
-<p>Run <code>buddy web serve</code>. Paste the token from <code>buddy web pair</code>.</p>
+<head><meta charset="utf-8"><title>Buddy · ChatGPT</title><link rel="stylesheet" href="ui.css"></head>
+<body class="popup">
+<header><h1>Buddy · ChatGPT</h1><button id="settingsToggle" class="link">Settings</button></header>
+<div id="migration" class="notice" hidden>Automatic archiving now runs every 15 minutes. You can pause it below. Task history starts with this update. <button id="dismissMigration" class="link">Dismiss</button></div>
+<section id="setup" class="card" hidden>
+<h2>Connect your local receiver</h2>
+<p class="muted">Run <code>buddy web serve</code>, then copy the token from <code>buddy web pair</code>.</p>
 <label>Receiver port<input id="port" type="number" min="1" max="65535" value="18242"></label>
-<label>Pairing token<input id="token" type="password" autocomplete="off"></label>
-<label><input id="autoSync" type="checkbox"> Sync every 15 minutes</label>
-<button id="connect">Save and connect</button>
-<hr>
-<button id="current">Save current conversation</button>
-<button id="sync">Sync history</button>
-<button id="full">Recheck all history</button>
-<pre id="status" role="status"></pre>
+<label>Pairing token<input id="token" type="password" autocomplete="off" spellcheck="false"></label>
+<button id="connect" class="primary">Connect and start automatic archiving</button>
+<p><small>The first connection starts archiving your accessible conversation history.</small></p>
+</section>
+<main id="dashboard" hidden>
+<div><div id="headline" class="status-title"></div><p id="schedule" class="muted"></p></div>
+<p id="destinationPreview" class="path muted"></p>
+<section class="card status-card" aria-live="polite">
+<h2 id="taskTitle">No sync completed yet</h2>
+<p id="taskDetail" class="muted"></p>
+<progress id="progress" hidden></progress>
+<p id="currentTitle"></p>
+<div class="metrics"><div><strong id="newCount">0</strong><span>New</span></div><div><strong id="updatedCount">0</strong><span>Updated</span></div><div><strong id="unchangedCount">0</strong><span>Unchanged</span></div></div>
+<p id="taskError" class="error"></p><small id="activity"></small>
+</section>
+<div class="actions"><button id="current">Save current conversation</button><button id="sync" class="primary">Sync now</button></div>
+<div class="section-heading"><h2>Recent archives</h2><button id="history" class="link">View all →</button></div>
+<div id="recent"><p class="muted">Loading archives…</p></div>
+<p id="archiveError" class="error"></p>
+<details class="card"><summary id="receiverLabel">Local receiver</summary><p id="connectionStatus"></p><p id="storagePath" class="path"></p><p id="cloudNote" class="muted"></p><button id="check" class="link">Check connection</button></details>
+<p><small>Runs every 15 minutes while the browser is running. Closing this popup does not stop archiving.</small></p>
+<footer class="row between"><button id="pause" class="link">Pause automatic archiving</button><button id="more" class="link">More</button></footer>
+<div id="moreActions" class="card" hidden><p class="muted">Recheck reads every accessible conversation again to repair or verify the archive.</p><button id="full">Recheck all history</button><hr><p class="muted">Discard an unfinished task to change accounts or destinations. Saved files remain. Pause first and wait for the current operation to finish.</p><button id="discard" class="danger">Discard unfinished tasks</button></div>
+<details class="card"><summary>What gets archived?</summary><p>Conversation JSON is sent to your local Buddy receiver. Markdown contains visible text on the current branch. Attachment files are not downloaded.</p><p>Deleting a ChatGPT conversation does not delete its archive. A cloud client may replicate the destination directory; Buddy cannot confirm cloud upload completion.</p></details>
+</main>
+<p id="feedback" class="error" role="alert"></p>
 <script src="popup.js" type="module"></script>
 </body></html>

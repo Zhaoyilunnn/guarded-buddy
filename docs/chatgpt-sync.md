@@ -15,10 +15,11 @@ The browser uses its existing ChatGPT login. No OpenAI API key is required.
    mode, select **Load unpacked**, and choose this repository's `extension/chatgpt`
    directory. The extension is not distributed through a browser store.
 4. Open ChatGPT in that browser and sign in. Open the extension popup, paste the
-   token, and select **Save and connect**.
-5. Select **Save current conversation** on a saved ChatGPT conversation, or
-   **Sync history** to read the paginated conversation list. Optionally enable
-   **Sync every 15 minutes**.
+   token, and select **Connect and start automatic archiving**. The first sync
+   starts immediately after the receiver connection is verified.
+5. Automatic archiving checks accessible history every 15 minutes while the
+   browser is running. Use **Save current conversation** for the active saved
+   conversation, or **Sync now** for an immediate incremental check.
 
 ```sh
 buddy web serve
@@ -163,6 +164,16 @@ distribution is already running uses the existing service. Systemd services
 the receiver runs while the distribution is active. This setup does not launch
 WSL automatically when Windows starts.
 
+## Upgrade
+
+After updating the repository, run `cargo install --path .`, restart the running
+`buddy web serve` process (or its systemd service), and reload the unpacked
+extension in `chrome://extensions`. Version 0.2.0 needs the updated receiver for
+archive browsing and Markdown status. Existing JSON files remain the archive
+source; existing extension pagination and pending delivery are recovered when
+possible. Recovered legacy tasks identify items checked before the update; their
+earlier per-item outcomes are unavailable. Explicit pauses made in this version survive subsequent reloads.
+
 ## Storage and report behavior
 
 Each account/conversation has one JSON file containing its latest complete
@@ -185,7 +196,10 @@ original link, creation/update timestamps, and visible messages on the current
 branch. Non-text attachments are not reconstructed. Cross-date updates remove
 the old Markdown and generate it beside the latest JSON. JSON remains the source
 for reports. The sync response confirms JSON persistence; it does not indicate
-Markdown completion. Conversion currently has no plugin progress indicator.
+Markdown completion. The archive manager shows Markdown as generating, ready, or failed independently
+of JSON persistence. Failed conversions can be queued again with **Retry Markdown**;
+the worker also retries automatically. Cloud-client upload completion is outside
+the receiver’s visibility.
 
 No separate `buddy sync` is needed to publish browser captures to that directory.
 Without `[sync].path`, the receiver writes to
@@ -239,9 +253,62 @@ Daily Markdown shows the ChatGPT title and original conversation URL. The source
 slug is `chatgpt`, distinct from the existing `codex` coding source. Existing
 message truncation and secret redaction apply.
 
+## Status, controls, and archive history
+
+After pairing, the popup shows the current stage, checked/total counts when the
+provider supplies a total, the current conversation title, and separate new,
+updated, and unchanged counts. Unknown totals use an indeterminate progress bar.
+Completion, interruption, and failures are explicit; the last successful sync
+and the next scheduled check or retry are shown separately. Receiver checks carry
+a timestamp rather than claiming continuous connectivity.
+
+Automatic archiving is enabled by default and is not an optional setup checkbox.
+Upgrading an older installation enables it once and shows a notice. Thereafter,
+**Pause automatic archiving** persists across browser restarts and suppresses both
+periodic work and recovery. A pause finishes any in-flight operation before
+stopping at the next safe boundary. **Resume automatic archiving** immediately
+continues pending work or starts a new check. A manual current-conversation save
+can run while automatic work is paused; it preserves the paused history task.
+Only one sync executes at a time.
+
+**View all** opens the archive manager:
+
+- **Conversation archive** queries files in the currently connected receiver’s
+  directory, including captures made before this version. Search titles, filter
+  by hashed account namespace, and page through results ordered by file save
+  time. Expand an entry for its original URL, update/capture/save times, actual
+  JSON and Markdown paths, and Markdown state. Paths can be copied; the extension
+  does not open arbitrary local files. **Save again** requires the matching
+  ChatGPT account to be signed in. **Refresh** reads the latest disk state.
+- **Sync tasks** shows trigger, scope, original account/destination, timestamps,
+  counts, and per-conversation results. Task IDs and counters survive recovery.
+  Unchanged counts include identical content, recently verified checkpoints, and
+  ignored older revisions; task details distinguish these outcomes. A failed
+  item is replaced by its eventual result when retried. Task details contain
+  metadata, not conversation bodies or credentials, and remain in extension-local
+  storage for 90 days after completion or discard. Unfinished tasks remain until
+  completed or discarded. Uninstalling the extension removes these task records,
+  but the disk archive remains discoverable after reconnecting. Older task
+  history cannot be reconstructed; recording starts with the upgrade.
+
+Settings hold the pairing credential and receiver port. Receiver details show the
+actual storage directory and whether an archive directory is configured. A cloud
+client may replicate either directory; Buddy confirms local persistence only.
+The archive list caches metadata in receiver memory and reconciles file changes
+on each query; unreadable files produce visible warnings rather than disappearing
+silently.
+
+**More** contains **Recheck all history** and **Discard unfinished tasks**.
+Discard requires pausing and waiting for the current operation to finish. It
+removes pending browser deliveries and recovery cursors, retains completed files
+and task records, and leaves automatic work paused. Use it when abandoning an
+unfinished task before changing accounts or destinations. A queued task refuses
+to deliver to a different storage identity or logged-in account. Connection
+settings cannot change while unfinished work exists.
+
 ## Incremental sync and recovery
 
-- **Sync history** compares list update timestamps with locally acknowledged
+- **Sync now** compares list update timestamps with locally acknowledged
   revisions, fetching details for changed or unrecognized conversations. Matching
   checkpoints expire after 15 minutes, so later syncs recheck details even when
   the provider's list timestamp does not reflect a content change. Provider
@@ -257,18 +324,19 @@ message truncation and secret redaction apply.
 - Pagination position and per-conversation acknowledgements are scoped to the
   receiver's storage identity and survive extension worker suspension. Changing
   the storage directory starts fresh checkpoints, so a previous destination's
-  acknowledgements cannot skip delivery to the new destination. A one-minute alarm checks for incomplete work even when
-  periodic sync is disabled. Interrupted items may be replayed safely.
+  acknowledgements cannot skip delivery to the new destination. A one-minute alarm checks for incomplete or overdue work. Interrupted items may
+  be replayed safely. An explicit pause prevents scheduled work and recovery.
 - Provider 429/5xx responses use bounded retries with backoff. Failed syncs retain
   their progress and retry after 15 minutes; the popup displays the failure.
   A failed conversation stops that run at its checkpoint. Login failures require
   signing in again. A queued snapshot for another account requires returning to
   that account before recovery can finish.
 - The browser must be running for alarms to run. Closing the popup does not
-  cancel synchronization. The receiver must be reachable for delivery.
+  cancel synchronization. Browser startup checks for interrupted and overdue
+  tasks. The receiver must be reachable for delivery.
 - HTTP 413 means a snapshot exceeds the receiver's request size limit. Increase
   `[web] max_body_mib` or pass `--max-body-mib`, restart the receiver, and retry
-  **Sync history**. The queued snapshot is retained for redelivery. A failed local
+  **Sync now**. The queued snapshot is retained for redelivery. A failed local
   network request also shows the upload size and identifies the Buddy receiver;
   a connection closed during an oversized upload may appear as a network failure
   rather than HTTP 413. No conversation payloads or credentials are logged.
@@ -294,12 +362,14 @@ ChatGPT in the browser. Only conversations exposed by the list endpoint or an
 explicit current-conversation save are captured. Temporary chats and inaccessible
 or separately archived conversations are not guaranteed to appear.
 
-The local protocol has two authenticated endpoints:
+The local protocol exposes these authenticated endpoints:
 
 | Endpoint | Behavior |
 | --- | --- |
-| `GET /health` | Returns `app: "buddy"`, `schema_version: 1`, and `storage_id` (a digest identifying the storage directory) |
+| `GET /health` | Returns `app: "buddy"`, `schema_version: 1`, and `storage_id` (a digest identifying the storage directory), `storage_path`, `shared_directory`, and `catalog_version: 1` |
 | `POST /v1/chatgpt` | Accepts `schema_version`, `account`, `captured_at`, and `conversation`; returns `status` (`created`, `updated`, `skipped`, or `stale`) |
+| `GET /v1/archives` | Returns metadata from disk; accepts `q` (case-insensitive title search), `account`, `offset`, and `limit` (default 50, maximum 100); returns `items`, filtered `total`, all account namespaces, and scan `warnings` |
+| `POST /v1/archives/retry` | Accepts `account` and `id` for an existing archive; queues Markdown conversion without accepting a caller-supplied filesystem path |
 
 ```mermaid
 sequenceDiagram
@@ -312,7 +382,8 @@ sequenceDiagram
     participant Report as Weekly report collector
 
     User->>Extension: Pair with buddy web pair token
-    User->>Extension: Save current / Sync history / Enable periodic sync
+    Extension->>Extension: Start automatic archiving after pairing; repeat every 15 minutes
+    User->>Extension: Save current / Sync now / Pause or resume
     Extension->>Receiver: Authenticated health check
     Extension->>ChatGPT: Use browser login to list and fetch conversations
     Extension->>Extension: Persist pending snapshot and pagination progress
@@ -323,7 +394,10 @@ sequenceDiagram
         Receiver->>Local: Compare revision and atomically replace conversation JSON
     end
     Receiver-->>Extension: Acknowledge saved / skipped / stale
-    Extension->>Extension: Persist checkpoint and clear pending snapshot
+    Extension->>Extension: Persist task result, counters, checkpoint and next cursor
+    User->>Extension: View archive and sync tasks
+    Extension->>Receiver: Authenticated archive metadata query
+    Receiver-->>Extension: Actual file paths and Markdown state
     Note over Archive: External sync product replicates the directory
     User->>Report: buddy wr collect / run
     Report->>Local: Read live snapshots
@@ -344,5 +418,8 @@ node extension/chatgpt/tests/background.test.js
 Rust integration tests exercise a real loopback receiver, authentication, atomic
 updates, archival, branch filtering, latest-snapshot selection, CLI collection,
 and weekly-report ingestion. Extension tests mock provider/receiver responses and
-browser storage, including offline delivery and worker restart. They do not
+browser storage, including automatic pairing sync, offline delivery, worker
+restart, pause/resume, destination/account isolation, and persistent task results.
+Receiver tests cover authenticated catalog search, pagination, disk reconciliation,
+conversion states, and retry validation. They do not
 replace a live test in an authenticated browser account.

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, bail};
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Query, State},
     http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
@@ -346,6 +346,7 @@ fn replace_latest(dir: &Path, snapshot: &Snapshot) -> anyhow::Result<&'static st
 struct MarkdownWorker {
     jobs: std::sync::mpsc::Sender<Option<PathBuf>>,
     thread: Option<std::thread::JoinHandle<()>>,
+    errors: Arc<Mutex<std::collections::HashMap<PathBuf, String>>>,
 }
 
 fn markdown_needed(path: &Path) -> bool {
@@ -364,6 +365,8 @@ fn markdown_needed(path: &Path) -> bool {
 impl MarkdownWorker {
     fn start(root: PathBuf) -> Self {
         let (jobs, receive) = std::sync::mpsc::channel::<Option<PathBuf>>();
+        let errors = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let worker_errors = errors.clone();
         let thread = std::thread::spawn(move || {
             let mut pending = std::collections::HashSet::new();
             for entry in walkdir::WalkDir::new(&root).follow_links(false) {
@@ -387,7 +390,12 @@ impl MarkdownWorker {
                             "Markdown conversion failed for {}: {error:#}",
                             path.display()
                         );
+                        if let Ok(mut errors) = worker_errors.lock() {
+                            errors.insert(path.clone(), error.to_string());
+                        }
                         failed.insert(path);
+                    } else if let Ok(mut errors) = worker_errors.lock() {
+                        errors.remove(&path);
                     }
                 }
                 pending = failed;
@@ -418,6 +426,7 @@ impl MarkdownWorker {
         });
         Self {
             jobs,
+            errors,
             thread: Some(thread),
         }
     }
@@ -474,6 +483,11 @@ fn export_markdown(root: &Path, path: &Path) -> anyhow::Result<()> {
         bail!("invalid Markdown destination");
     }
     if std::fs::read_to_string(&destination).ok().as_deref() == Some(&markdown) {
+        // Mark an identical export as verified against the latest JSON.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&destination)?
+            .set_modified(std::time::SystemTime::now())?;
         return Ok(());
     }
     let temp = path.with_extension(format!("{}.tmp", rand::random::<u64>()));
@@ -499,6 +513,8 @@ struct Receiver {
     writes: Arc<Mutex<()>>,
     host: String,
     markdown: std::sync::mpsc::Sender<Option<PathBuf>>,
+    markdown_errors: Arc<Mutex<std::collections::HashMap<PathBuf, String>>>,
+    catalog: Arc<Mutex<ArchiveCache>>,
 }
 
 fn authorized(headers: &HeaderMap, receiver: &Receiver) -> bool {
@@ -579,8 +595,214 @@ async fn health(
     let root = std::fs::canonicalize(&root).unwrap_or(root);
     let storage_id = format!("{:x}", Sha256::digest(root.to_string_lossy().as_bytes()));
     Ok(Json(
-        json!({"app": "buddy", "schema_version": 1, "storage_id": storage_id}),
+        json!({"app": "buddy", "schema_version": 1, "storage_id": storage_id,
+            "storage_path": root, "catalog_version": 1, "shared_directory": receiver.archive.is_some()}),
     ))
+}
+
+#[derive(Default)]
+struct ArchiveCache {
+    entries: std::collections::HashMap<PathBuf, (std::time::SystemTime, u64, Value)>,
+}
+
+impl Receiver {
+    fn root(&self) -> PathBuf {
+        self.archive
+            .as_ref()
+            .map(|p| p.join("chatgpt"))
+            .unwrap_or_else(|| history_root(&self.home))
+    }
+
+    fn archive_rows(&self) -> anyhow::Result<(Vec<Value>, Vec<String>)> {
+        // Cache only metadata, never conversation bodies. Reconcile with disk on every query.
+        let _writes = self
+            .writes
+            .lock()
+            .map_err(|_| anyhow::anyhow!("receiver lock failed"))?;
+        let mut cache = self
+            .catalog
+            .lock()
+            .map_err(|_| anyhow::anyhow!("catalog lock failed"))?;
+        let errors = self
+            .markdown_errors
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Markdown lock failed"))?;
+        let root = self.root();
+        let mut seen = std::collections::HashSet::new();
+        let mut rows = Vec::new();
+        let mut warnings = Vec::new();
+        for entry in walkdir::WalkDir::new(&root).follow_links(false) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    warnings.push(error.to_string());
+                    continue;
+                }
+            };
+            if !entry.file_type().is_file() || entry.path().extension().is_none_or(|x| x != "json")
+            {
+                continue;
+            }
+            let path = entry.path().to_path_buf();
+            let result = (|| -> anyhow::Result<Value> {
+                let meta = entry.metadata()?;
+                let modified = meta.modified()?;
+                if cache
+                    .entries
+                    .get(&path)
+                    .is_none_or(|(time, size, _)| *time != modified || *size != meta.len())
+                {
+                    let snapshot = read_snapshot(&path)?;
+                    if !path.starts_with(root.join(&snapshot.account)) {
+                        bail!("snapshot account does not match its path");
+                    }
+                    let row = json!({
+                        "id": snapshot.id(), "account": snapshot.account,
+                        "title": snapshot.conversation["title"].as_str().unwrap_or("Untitled"),
+                        "url": format!("https://chatgpt.com/c/{}", snapshot.id()),
+                        "updated_at": snapshot.revision(), "captured_at": snapshot.captured_at,
+                        "saved_at": chrono::DateTime::<chrono::Utc>::from(modified),
+                        "path": path, "markdown_path": path.with_extension("md")
+                    });
+                    cache
+                        .entries
+                        .insert(path.clone(), (modified, meta.len(), row));
+                }
+                let mut row = cache.entries[&path].2.clone();
+                let needed = markdown_needed(&path);
+                row["markdown_status"] = json!(if !needed {
+                    "ready"
+                } else if errors.contains_key(&path) {
+                    "failed"
+                } else {
+                    "pending"
+                });
+                row["markdown_error"] = if needed {
+                    json!(errors.get(&path))
+                } else {
+                    Value::Null
+                };
+                Ok(row)
+            })();
+            seen.insert(path);
+            match result {
+                Ok(row) => rows.push(row),
+                Err(error) => warnings.push(format!("{}: {error}", entry.path().display())),
+            }
+        }
+        cache.entries.retain(|path, _| seen.contains(path));
+        rows.sort_by(|a, b| {
+            b["saved_at"]
+                .as_str()
+                .cmp(&a["saved_at"].as_str())
+                .then_with(|| a["path"].as_str().cmp(&b["path"].as_str()))
+        });
+        Ok((rows, warnings))
+    }
+}
+
+#[derive(Default, Deserialize)]
+struct ArchiveQuery {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    account: String,
+    #[serde(default)]
+    offset: usize,
+    limit: Option<usize>,
+}
+
+async fn archives(
+    State(receiver): State<Receiver>,
+    headers: HeaderMap,
+    Query(query): Query<ArchiveQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    if !authorized(&headers, &receiver) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "invalid token, host or origin".into(),
+        ));
+    }
+    tokio::task::spawn_blocking(move || {
+        let (rows, warnings) = receiver.archive_rows()?;
+        let accounts: std::collections::BTreeSet<_> = rows
+            .iter()
+            .filter_map(|r| r["account"].as_str().map(str::to_owned))
+            .collect();
+        let search = query.q.to_lowercase();
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|r| {
+                (query.account.is_empty() || r["account"] == query.account)
+                    && r["title"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&search)
+            })
+            .collect();
+        let total = rows.len();
+        let items: Vec<_> = rows
+            .into_iter()
+            .skip(query.offset)
+            .take(query.limit.unwrap_or(50).clamp(1, 100))
+            .collect();
+        Ok::<_, anyhow::Error>(Json(
+            json!({"items": items, "total": total, "accounts": accounts, "warnings": warnings}),
+        ))
+    })
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "catalog worker failed".into(),
+        )
+    })?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+#[derive(Deserialize)]
+struct ArchiveItem {
+    account: String,
+    id: String,
+}
+
+async fn retry_markdown(
+    State(receiver): State<Receiver>,
+    headers: HeaderMap,
+    Json(item): Json<ArchiveItem>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    if !authorized(&headers, &receiver) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "invalid token, host or origin".into(),
+        ));
+    }
+    // Resolve only existing catalog entries; callers cannot supply filesystem paths.
+    tokio::task::spawn_blocking(move || {
+        let (rows, _) = receiver
+            .archive_rows()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let row = rows
+            .iter()
+            .find(|r| r["id"] == item.id && r["account"] == item.account)
+            .ok_or((StatusCode::NOT_FOUND, "archive not found".into()))?;
+        let path = PathBuf::from(row["path"].as_str().unwrap_or(""));
+        receiver.markdown.send(Some(path)).map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Markdown worker unavailable".into(),
+            )
+        })?;
+        Ok(Json(json!({"status": "queued"})))
+    })
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "catalog worker failed".into(),
+        )
+    })?
 }
 
 pub fn run(
@@ -657,10 +879,14 @@ pub fn run(
                 writes: Arc::new(Mutex::new(())),
                 host: format!("127.0.0.1:{port}"),
                 markdown: _markdown_worker.jobs.clone(),
+                markdown_errors: _markdown_worker.errors.clone(),
+                catalog: Arc::new(Mutex::new(ArchiveCache::default())),
             };
             tokio::runtime::Runtime::new()?.block_on(async {
                 let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
                 let router = Router::new().route("/health", get(health)).route("/v1/chatgpt", post(ingest))
+                    .route("/v1/archives", get(archives))
+                    .route("/v1/archives/retry", post(retry_markdown))
                     .layer(DefaultBodyLimit::max(max_body)).with_state(receiver);
                 eprintln!("ChatGPT receiver: http://127.0.0.1:{port} (Ctrl-C to stop). Max request body: {} MiB. Pair with buddy web pair.", max_body / (1024 * 1024));
                 axum::serve(listener, router).with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; }).await
@@ -753,6 +979,73 @@ mod tests {
                 .unwrap()
                 .contains("Hello")
         );
+    }
+
+    #[test]
+    fn catalog_reconciles_existing_updates_deletions_and_markdown_errors() {
+        let home = tempfile::tempdir().unwrap();
+        let root = history_root(home.path());
+        let mut snapshot = Snapshot {
+            schema_version: 1,
+            account: "a".repeat(64),
+            captured_at: chrono::Utc::now(),
+            conversation: json!({"conversation_id": "test", "title": "Before upgrade", "update_time": 1700000000,
+                "current_node": "a", "mapping": {"a": {"parent": null, "message": {"author": {"role": "user"},
+                "create_time": 1700000000, "content": {"parts": ["Hello"]}}}}}),
+        };
+        save_snapshot(home.path(), &snapshot).unwrap();
+        let path = root
+            .join(&snapshot.account)
+            .join(snapshot_date(&snapshot).unwrap())
+            .join("test.json");
+        let (jobs, _receive) = std::sync::mpsc::channel();
+        let receiver = Receiver {
+            home: home.path().into(),
+            archive: None,
+            token: "b".repeat(64),
+            host: "127.0.0.1:1".into(),
+            writes: Arc::new(Mutex::new(())),
+            markdown: jobs,
+            markdown_errors: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            catalog: Arc::new(Mutex::new(ArchiveCache::default())),
+        };
+        assert_eq!(
+            receiver.archive_rows().unwrap().0[0]["title"],
+            "Before upgrade"
+        );
+        receiver
+            .markdown_errors
+            .lock()
+            .unwrap()
+            .insert(path.clone(), "Conversion failed".into());
+        assert_eq!(
+            receiver.archive_rows().unwrap().0[0]["markdown_status"],
+            "failed"
+        );
+        export_markdown(&root, &path).unwrap();
+        assert_eq!(
+            receiver.archive_rows().unwrap().0[0]["markdown_status"],
+            "ready"
+        );
+        snapshot.conversation["title"] = json!("Renamed conversation");
+        snapshot.captured_at = chrono::Utc::now();
+        save_snapshot(home.path(), &snapshot).unwrap();
+        assert_eq!(
+            receiver.archive_rows().unwrap().0[0]["title"],
+            "Renamed conversation"
+        );
+        export_markdown(&root, &path).unwrap();
+        // JSON metadata can change while rendered Markdown remains identical.
+        snapshot.conversation["extra_metadata"] = json!("changed");
+        snapshot.captured_at = chrono::Utc::now();
+        save_snapshot(home.path(), &snapshot).unwrap();
+        export_markdown(&root, &path).unwrap();
+        assert!(!markdown_needed(&path));
+        std::fs::write(root.join("invalid.json"), "broken").unwrap();
+        assert_eq!(receiver.archive_rows().unwrap().1.len(), 1);
+        std::fs::remove_file(&path).unwrap();
+        assert!(receiver.archive_rows().unwrap().0.is_empty());
+        assert!(receiver.catalog.lock().unwrap().entries.is_empty());
     }
 
     #[test]

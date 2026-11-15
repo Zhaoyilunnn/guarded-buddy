@@ -79,8 +79,11 @@ Detailed behavior and sequence diagram: [docs/buddy-sync.md](docs/buddy-sync.md)
 
 Run `buddy web serve`, copy the token from `buddy web pair`, and load
 [`extension/chatgpt`](extension/chatgpt) as an unpacked Chromium extension.
-The extension can save the current ChatGPT conversation, sync history, and sync
-automatically every 15 minutes using your existing browser login.
+The extension starts archiving after pairing and checks history automatically
+every 15 minutes using your existing browser login. Its popup shows progress and
+recent archives; the archive manager provides searchable saved conversations,
+file paths, Markdown status, and persistent sync-task history. Automatic work can
+be paused and resumed; current-conversation saves remain available while paused.
 
 With `[sync].path` configured, the receiver saves directly to
 `<sync.path>/chatgpt/<account>/YYYY/MM/DD/<conversation-id>.json`; otherwise it uses local HOME. A background worker generates same-name Markdown files beside the JSON while the receiver runs.

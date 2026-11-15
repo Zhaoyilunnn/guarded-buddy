@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Buddy · Archive & sync history</title><link rel="stylesheet" href="ui.css"></head>
+<body class="manager">
+<header><div><h1>Archive & sync history</h1><p class="muted">Confirm what was saved and inspect each sync task.</p></div><button id="refresh">Refresh</button></header>
+<p id="destination" class="path"></p>
+<nav class="tabs" role="tablist" aria-label="History views"><button id="archivesTab" role="tab" aria-selected="true" aria-controls="archivesPanel">Conversation archive</button><button id="runsTab" role="tab" aria-selected="false" aria-controls="runsPanel">Sync tasks</button></nav>
+<section id="archivesPanel" role="tabpanel" aria-labelledby="archivesTab">
+<div class="filters"><label>Search titles<input id="search" type="search" placeholder="Search archived conversations"></label><label>Account namespace<select id="account"><option value="">All accounts</option></select></label><button id="searchButton">Search</button></div>
+<p class="muted">Archive entries reflect files in the connected receiver’s current directory, including files saved before this update. Account identifiers are hashed namespaces.</p>
+<p id="archiveSummary" role="status"></p><p id="warnings" class="error"></p><div id="archives"></div>
+<div class="row between"><button id="previous">Previous</button><span id="page"></span><button id="next">Next</button></div>
+</section>
+<section id="runsPanel" role="tabpanel" aria-labelledby="runsTab" hidden>
+<p id="retention" class="muted"></p><p class="muted">Tasks include their original account and destination. Counts resume after interruption. “Unchanged” includes identical content, recently verified conversations, and ignored older revisions.</p><div id="runs"></div><div class="row between"><button id="previousRuns">Previous</button><span id="runsPage"></span><button id="nextRuns">Next</button></div>
+</section>
+<p id="feedback" class="error" role="alert"></p>
+<script src="history.js" type="module"></script>
+</body></html>

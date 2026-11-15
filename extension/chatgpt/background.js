@@ -1,9 +1,10 @@
 import { login, listPage, conversation, revision } from "./api.js";
 
+const interval = 15 * 60000;
+const retention = 90 * 86400000;
 let running = false;
-const defaults = { port: 18242, token: "", autoSync: false };
-const checkpointMaxAge = 15 * 60000;
-
+let stopRequested = false;
+const defaults = { port: 18242, token: "", paused: false };
 async function settings() {
   return { ...defaults, ...await chrome.storage.local.get(Object.keys(defaults)) };
 }
@@ -26,6 +27,9 @@ async function receiver(config, path, payload) {
   if (response.status === 413) {
     throw new Error(`Buddy upload (${size}) exceeds the receiver size limit. Increase [web] max_body_mib in ~/.config/buddy/config.toml or use buddy web serve --max-body-mib, then restart the receiver and retry.`);
   }
+  if (response.status === 404 && path.startsWith("/v1/archives")) {
+    throw new Error("Archive browsing requires the updated Buddy receiver. Reinstall Buddy and restart buddy web serve.");
+  }
   if (!response.ok) throw new Error(`Buddy receiver HTTP ${response.status}. Check the token and buddy web serve.`);
   const result = await response.json();
   if (path === "/health" && (result.app !== "buddy" || result.schema_version !== 1)) {
@@ -36,115 +40,302 @@ async function receiver(config, path, payload) {
 
 async function status(patch) {
   const { status = {} } = await chrome.storage.local.get("status");
-  await chrome.storage.local.set({ status: { ...status, ...patch } });
+  await chrome.storage.local.set({ status: { ...status, ...patch, changedAt: Date.now() } });
 }
 
-async function sync({ currentId = null, full = false, resume = false } = {}) {
-  if (running) return;
+async function health(config) {
+  try {
+    const info = await receiver(config, "/health");
+    await chrome.storage.local.set({ connection: { ...info, port: config.port, checkedAt: Date.now(), ok: true } });
+    return info;
+  } catch (error) {
+    await chrome.storage.local.set({ connection: { port: config.port, checkedAt: Date.now(), ok: false, error: error.message } });
+    throw error;
+  }
+}
+
+async function prune() {
+  const { runs = [] } = await chrome.storage.local.get("runs");
+  const expired = runs.filter(r => r.endedAt && r.endedAt < Date.now() - retention);
+  await chrome.storage.local.remove(expired.map(r => `run:${r.id}`));
+  const kept = runs.filter(r => !expired.some(e => e.id === r.id));
+  await chrome.storage.local.set({ runs: kept });
+}
+
+async function publish(progress, extra = {}, storage = {}) {
+  const { run } = progress;
+  const { runs = [] } = await chrome.storage.local.get("runs");
+  const summary = { ...run };
+  delete summary.results;
+  const previous = await chrome.storage.local.get("status");
+  const nextStatus = { ...previous.status, ...summary, saved: run.created + run.updated,
+    skipped: run.unchanged + run.stale + run.checkpointSkipped, changedAt: Date.now(), ...extra };
+  await chrome.storage.local.set({
+    ...storage, [progress.key]: progress, [`run:${run.id}`]: run,
+    // The summary index changes only at task boundaries, not for every item.
+    ...(!runs.some(r => r.id === run.id) || !extra.running
+      ? { runs: [summary, ...runs.filter(r => r.id !== run.id)] } : {}), status: nextStatus,
+  });
+}
+
+async function phase(progress, stage, title = null) {
+  progress.run.stage = stage;
+  progress.run.currentTitle = title;
+  progress.run.state = "running";
+  progress.run.error = null;
+  await publish(progress, { running: true, error: null });
+}
+
+function result(progress, item, outcome, error = null) {
+  const record = { id: item.id, title: item.title || item.id, outcome, error, at: Date.now() };
+  // Retrying an item updates its result rather than adding a second checked item.
+  const index = progress.run.results.findIndex(r => r.id === item.id);
+  if (index >= 0) progress.run.results[index] = record;
+  else progress.run.results.push(record);
+  progress.run.failed = progress.run.results.filter(r => r.outcome === "failed").length;
+}
+
+async function sync({ currentId = null, full = false, trigger = "manual", expectedAccount = null } = {}) {
+  if (running) return { busy: true };
   running = true;
-  let saved = 0;
-  let skipped = 0;
+  stopRequested = false;
+  let progress;
+  let pointer;
   try {
     const config = await settings();
-    await status({ running: true, error: null, saved, skipped });
-    const health = await receiver(config, "/health");
-    const storageId = health.storage_id || "legacy";
-    const auth = await login();
-    // A pending payload survives an offline receiver or worker suspension.
-    const { pending } = await chrome.storage.local.get("pending");
-    if (pending) {
-      if (pending.account !== auth.account) throw new Error("A pending snapshot belongs to another account. Sign in to that account to finish syncing.");
-      await receiver(config, "/v1/chatgpt", pending);
-      await chrome.storage.local.remove("pending");
+    if (config.paused && !currentId) return { paused: true };
+    const pointers = await chrome.storage.local.get(["activeProgress", "currentProgress"]);
+    pointer = currentId ? "currentProgress" : (pointers.currentProgress ? "currentProgress" : "activeProgress");
+    const key = pointers[pointer];
+    if (key) progress = (await chrome.storage.local.get(key))[key];
+    if (progress && !progress.run) {
+      // Preserve old pagination; counters and task history begin with this upgrade.
+      progress = { ...progress, legacy: true };
     }
-    const progressKey = `progress:${auth.account}:${storageId}`;
-    let { [progressKey]: progress } = await chrome.storage.local.get(progressKey);
-    if (!resume || !progress) progress = { offset: 0, index: 0, items: null, full, currentId };
-    full = progress.full;
-    currentId = progress.currentId;
-    await chrome.storage.local.set({ [progressKey]: progress, activeProgress: progressKey });
-    const tokenDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(config.token));
-    const receiverId = [...new Uint8Array(tokenDigest)].map(b => b.toString(16).padStart(2, "0")).join("");
+    if (progress?.run && currentId && progress.currentId !== currentId) {
+      throw new Error("Finish the pending single-conversation save before saving another conversation.");
+    }
+    if (!progress?.run) {
+      const id = crypto.randomUUID();
+      const legacyScope = progress?.legacy && key?.match(/^progress:([a-f0-9]{64}):(.+)$/);
+      progress = { ...progress, key: `progress:${id}`, offset: progress?.offset || 0,
+        index: progress?.index || 0, items: progress?.items || null, full: progress?.full || full,
+        currentId: progress?.currentId || currentId, expectedAccount,
+        run: { id, trigger, scope: (progress?.currentId || currentId) ? "conversation" : (progress?.full || full) ? "full" : "incremental",
+          startedAt: Date.now(), endedAt: null, total: progress?.total ?? null, error: null, currentTitle: null, state: "running", stage: "Connecting to Buddy",
+          checked: progress?.legacy ? (progress.offset || 0) + (progress.index || 0) : 0,
+          previouslyChecked: progress?.legacy ? (progress.offset || 0) + (progress.index || 0) : 0,
+          account: legacyScope ? legacyScope[1] : null, storageId: legacyScope ? legacyScope[2] : null,
+          created: 0, updated: 0, unchanged: 0, stale: 0, checkpointSkipped: 0, failed: 0, results: [] } };
+      await publish(progress, { running: true }, { [pointer]: progress.key });
+      if (key && key !== progress.key) await chrome.storage.local.remove(key);
+    }
+    if (progress.expectedAccount && expectedAccount && progress.expectedAccount !== expectedAccount) {
+      throw new Error("The pending task belongs to another account. Finish or discard it first.");
+    }
+    await phase(progress, "Connecting to Buddy");
+    const info = await health(config);
+    const storageId = info.storage_id || "legacy";
+    if (progress.run.storageId && progress.run.storageId !== storageId) {
+      throw new Error("The destination changed during an unfinished task. Restore the previous destination or discard this task before syncing to the new one.");
+    }
+    progress.run.storageId = storageId;
+    progress.run.port = config.port;
+    progress.run.storagePath = info.storage_path;
+    await phase(progress, "Checking ChatGPT login");
+    const auth = await login();
+    if ((progress.run.account && progress.run.account !== auth.account)
+        || (progress.expectedAccount && progress.expectedAccount !== auth.account)
+        || (expectedAccount && expectedAccount !== auth.account)) {
+      throw new Error("This task belongs to another ChatGPT account. Sign in to that account before continuing.");
+    }
+    progress.run.account = auth.account;
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(config.token));
+    const receiverId = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
     const checkpointKey = `checkpoints:${auth.account}:${config.port}:${receiverId}:${storageId}`;
     const stored = await chrome.storage.local.get(checkpointKey);
     const checkpoints = stored[checkpointKey] || {};
+    const { pending: legacyPending } = await chrome.storage.local.get("pending");
+    if (legacyPending && !stopRequested) {
+      if (legacyPending.account !== auth.account) throw new Error("A pending snapshot belongs to another account. Sign in to that account to finish syncing.");
+      await receiver(config, "/v1/chatgpt", legacyPending);
+      await chrome.storage.local.remove("pending");
+    }
+    async function stopped() {
+      if (!stopRequested) return false;
+      progress.run.state = "paused";
+      progress.run.stage = "Paused";
+      await publish(progress, { running: false });
+      return true;
+    }
+    if (await stopped()) return;
     while (true) {
       if (!progress.items) {
-        if (currentId) progress.items = [{ id: currentId }];
+        await phase(progress, "Getting conversation list");
+        if (progress.currentId) { progress.items = [{ id: progress.currentId }]; progress.run.total = 1; }
         else {
           const page = await listPage(auth.token, progress.offset);
           progress.items = page.items;
-          progress.total = page.total;
+          progress.run.total = page.total;
         }
-        await chrome.storage.local.set({ [progressKey]: progress });
+        await publish(progress, { running: true });
       }
-      for (; progress.index < progress.items.length; progress.index++) {
+      for (; progress.index < progress.items.length;) {
+        if (await stopped()) return;
         const item = progress.items[progress.index];
+        progress.run.currentId = item.id;
+        await phase(progress, "Checking conversation", item.title || item.id);
         const updated = revision(item.update_time);
         const checkpoint = checkpoints[item.id];
-        // List timestamps can lag content changes; periodically verify the details.
         const age = Date.now() - checkpoint?.checkedAt;
-        if (!full && !currentId && updated > 0 && checkpoint?.revision === updated
-            && age >= 0 && age < checkpointMaxAge) skipped++;
-        else {
-          const body = await conversation(auth.token, item.id);
-          const payload = { schema_version: 1, account: auth.account, captured_at: new Date().toISOString(), conversation: body };
-          await chrome.storage.local.set({ pending: payload });
-          const acknowledgement = await receiver(config, "/v1/chatgpt", payload);
+        let outcome;
+        let body;
+        if (!progress.pending && !progress.full && !progress.currentId && updated > 0
+            && checkpoint?.revision === updated && age >= 0 && age < interval) {
+          outcome = "checkpointSkipped";
+        } else {
+          if (!progress.pending) {
+            await phase(progress, "Reading conversation", item.title || item.id);
+            body = await conversation(auth.token, item.id);
+            progress.pending = { schema_version: 1, account: auth.account,
+              captured_at: new Date().toISOString(), conversation: body };
+            await publish(progress, { running: true });
+          }
+          body = progress.pending.conversation;
+          if (await stopped()) return;
+          await phase(progress, "Saving conversation", body.title || item.title || item.id);
+          const acknowledgement = await receiver(config, "/v1/chatgpt", progress.pending);
+          if (!["created", "updated", "skipped", "stale"].includes(acknowledgement.status)) {
+            throw new Error("Buddy did not confirm a recognized persistence result. Upgrade the receiver and retry.");
+          }
+          outcome = acknowledgement.status === "skipped" ? "unchanged" : acknowledgement.status;
           checkpoints[item.id] = { revision: revision(body.update_time), checkedAt: Date.now() };
-          await chrome.storage.local.set({ [checkpointKey]: checkpoints });
-          await chrome.storage.local.remove("pending");
-          if (acknowledgement.status === "created" || acknowledgement.status === "updated") saved++;
-          else skipped++;
         }
-        await chrome.storage.local.set({ [progressKey]: { ...progress, index: progress.index + 1 } });
-        await status({ saved, skipped });
+        progress.run[outcome]++;
+        progress.run.checked++;
+        result(progress, { ...item, title: body?.title || item.title }, outcome);
+        progress.pending = null;
+        progress.index++;
+        // Persist the acknowledgement and cursor together before doing more work.
+        await publish(progress, { running: true }, { [checkpointKey]: checkpoints });
       }
-      if (currentId || progress.items.length === 0 || (progress.total != null && progress.offset + progress.items.length >= progress.total)) break;
+      if (await stopped()) return;
+      if (progress.currentId || !progress.items.length ||
+          (progress.run.total != null && progress.offset + progress.items.length >= progress.run.total)) break;
       progress = { ...progress, offset: progress.offset + progress.items.length, index: 0, items: null };
-      await chrome.storage.local.set({ [progressKey]: progress });
+      await publish(progress, { running: true });
     }
-    await chrome.storage.local.remove([progressKey, "activeProgress"]);
-    await status({ running: false, saved, skipped, lastSync: new Date().toISOString(), error: null, retryAt: 0 });
+    progress.run.state = "completed";
+    progress.run.stage = "Sync complete";
+    progress.run.endedAt = Date.now();
+    progress.run.currentTitle = null;
+    await publish(progress, { running: false, lastSync: new Date().toISOString(), retryAt: 0,
+      nextSync: Date.now() + interval, error: null });
+    await chrome.storage.local.remove([progress.key, pointer]);
+    await prune();
   } catch (error) {
-    await status({ running: false, saved, skipped, error: error.message || String(error), retryAt: Date.now() + 15 * 60000 });
+    const message = error.message || String(error);
+    if (progress?.run) {
+      progress.run.state = "failed";
+      progress.run.error = message;
+      const item = progress.items?.[progress.index];
+      if (item) result(progress, { ...item, title: progress.run.currentTitle || item.title }, "failed", message);
+      await publish(progress, { running: false, error: message, retryAt: Date.now() + interval });
+    } else await status({ running: false, error: message, retryAt: Date.now() + interval });
   } finally { running = false; }
 }
 
 async function setupAlarm() {
-  const config = await settings();
-  await chrome.alarms.clear("sync");
-  if (config.autoSync) await chrome.alarms.create("sync", { periodInMinutes: 15 });
-  // A separate alarm resumes incomplete work after service-worker termination.
+  await chrome.alarms.create("sync", { periodInMinutes: 15 });
   await chrome.alarms.create("resume", { periodInMinutes: 1 });
 }
 
-chrome.alarms.onAlarm.addListener(async alarm => {
-  if (alarm.name === "sync") await sync({ resume: true });
-  if (alarm.name === "resume") {
-    const { activeProgress, status = {} } = await chrome.storage.local.get(["activeProgress", "status"]);
-    if (activeProgress && (!status.retryAt || status.retryAt <= Date.now())) await sync({ resume: true });
-  }
-});
+async function tick() {
+  const config = await settings();
+  if (!config.token || config.paused || running) return;
+  const { activeProgress, currentProgress, status = {} } = await chrome.storage.local.get(["activeProgress", "currentProgress", "status"]);
+  if (activeProgress || currentProgress) {
+    if (!status.retryAt || status.retryAt <= Date.now()) await sync({ trigger: "recovery" });
+  } else if (!status.nextSync || status.nextSync <= Date.now()) await sync({ trigger: "scheduled" });
+}
+
+chrome.alarms.onAlarm.addListener(async () => { await ready; await tick(); });
+chrome.runtime.onStartup?.addListener(async () => { await ready; await tick(); });
+chrome.runtime.onInstalled?.addListener(async () => { await ready; await tick(); });
 
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL(""))) return;
   (async () => {
+    await ready;
     if (message.type === "settings") {
-      const { port, token, autoSync } = message;
-      if (!Number.isInteger(port) || port < 1 || port > 65535 || !/^[a-f0-9]{64}$/i.test(token) || typeof autoSync !== "boolean") throw new Error("Use a valid port and the 64-character buddy pairing token.");
-      await chrome.storage.local.set({ port, token, autoSync });
+      const { port, token } = message;
+      if (!Number.isInteger(port) || port < 1 || port > 65535 || !/^[a-f0-9]{64}$/i.test(token)) throw new Error("Use a valid port and the 64-character Buddy pairing token.");
+      const config = await settings();
+      const { activeProgress, currentProgress } = await chrome.storage.local.get(["activeProgress", "currentProgress"]);
+      if ((running || activeProgress || currentProgress) && (config.port !== port || config.token !== token)) {
+        throw new Error("Finish or discard pending tasks before changing the connection.");
+      }
+      await health({ port, token });
+      await chrome.storage.local.set({ port, token, paired: true });
       await setupAlarm();
-      await receiver({ port, token }, "/health");
+      if (!config.paused) void sync({ trigger: "connection" });
+    } else if (message.type === "health") {
+      await health(await settings());
+    } else if (message.type === "pause") {
+      await chrome.storage.local.set({ paused: true });
+      stopRequested = true;
+      if (!running) await status({ running: false });
+    } else if (message.type === "resume") {
+      await chrome.storage.local.set({ paused: false });
+      if (!running) void sync({ trigger: "recovery" });
+    } else if (message.type === "discard") {
+      if (running || !(await settings()).paused) throw new Error("Pause and wait for the current save to finish before discarding a task.");
+      for (const pointer of ["activeProgress", "currentProgress"]) {
+        const key = (await chrome.storage.local.get(pointer))[pointer];
+        const progress = key && (await chrome.storage.local.get(key))[key];
+        if (progress?.run) {
+          progress.run.state = "discarded";
+          progress.run.endedAt = Date.now();
+          progress.run.stage = "Task discarded; saved files retained";
+          await publish(progress, { running: false, retryAt: 0, error: null });
+        }
+        if (key) await chrome.storage.local.remove([key, pointer]);
+      }
+      await chrome.storage.local.remove("pending");
     } else if (message.type === "sync") {
+      if (running) throw new Error("A sync is already running. Check the current task for progress.");
       if (message.currentId && !/^[a-zA-Z0-9_-]{1,128}$/.test(message.currentId)) throw new Error("Invalid conversation ID.");
-      void sync({ currentId: message.currentId || null, full: message.full === true });
-    }
-    respond({ ok: true });
-  })().catch(error => respond({ ok: false, error: error.message }));
+      if (message.full) {
+        const { activeProgress } = await chrome.storage.local.get("activeProgress");
+        if (activeProgress) throw new Error("Finish or discard the pending history task before rechecking all history.");
+      }
+      const config = await settings();
+      if (config.paused && !message.currentId) throw new Error("Resume automatic archiving before syncing history.");
+      if (!running) void sync({ currentId: message.currentId || null, full: message.full === true,
+        expectedAccount: message.account || null, trigger: "manual" });
+    } else if (message.type === "archives") {
+      const config = await settings();
+      const query = new URLSearchParams({ q: String(message.q || ""), account: String(message.account || ""),
+        offset: String(Math.max(0, Number(message.offset) || 0)), limit: String(Math.min(100, Number(message.limit) || 50)) });
+      return { ok: true, data: await receiver(config, `/v1/archives?${query}`) };
+    } else if (message.type === "retryMarkdown") {
+      return { ok: true, data: await receiver(await settings(), "/v1/archives/retry", { account: message.account, id: message.id }) };
+    } else throw new Error("Unknown extension action.");
+    return { ok: true };
+  })().then(respond).catch(error => respond({ ok: false, error: error.message }));
   return true;
 });
 
-// The persisted status may refer to a worker that was terminated.
-chrome.storage.local.get("status").then(({ status = {} }) => chrome.storage.local.set({ status: { ...status, running: false } }));
-setupAlarm();
+const ready = (async () => {
+  const { status: previous = {}, migrationVersion, token } = await chrome.storage.local.get(["status", "autoSync", "migrationVersion", "token"]);
+  if (!migrationVersion) {
+    await chrome.storage.local.set({ migrationVersion: 1, historyStartedAt: Date.now(),
+      migrationNotice: Boolean(token), paused: false });
+    await chrome.storage.local.remove("autoSync");
+  }
+  await status({ running: false, state: previous.running ? "interrupted" : previous.state });
+  await prune();
+  await setupAlarm();
+})();
+// Startup checks also cover an existing installation whose periodic alarm was absent.
+ready.then(() => tick());
