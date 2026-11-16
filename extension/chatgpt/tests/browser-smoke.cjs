@@ -4,7 +4,6 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const { createHash } = require('node:crypto');
 const root = path.resolve(__dirname, '..');
 (async () => {
   const server = http.createServer((req, res) => {
@@ -18,32 +17,29 @@ const root = path.resolve(__dirname, '..');
   try {
     browser = await chromium.launch({ executablePath: process.env.BUDDY_CHROMIUM_EXECUTABLE, headless: true, args: ['--no-sandbox'] });
     const context = await browser.newContext({ viewport: { width: 420, height: 880 } });
-    const account = createHash('sha256').update('synthetic-user').digest('hex');
-    await context.addInitScript(({ account }) => {
+    await context.addInitScript(() => {
+      const account = 'a'.repeat(64);
       const now = Date.now();
-      const run = { id: 'legacy-native', startedAt: now - 1000, endedAt: null, scope: 'incremental', state: 'paused', checked: 1, total: 2, created: 1, updated: 0, unchanged: 0, stale: 0, checkpointSkipped: 0, failed: 0, account, storageId: 'native', results: [{ id: 'one', title: 'First', at: now, outcome: 'created' }] };
       const body = id => ({ conversation_id: id, title: id === 'two' ? '<img src=x onerror=alert(1)>' : 'First', current_node: 'n', mapping: {}, update_time: 100, metadata: 'x'.repeat(512 * 1024) });
-      if (!localStorage.getItem('fixture')) localStorage.setItem('fixture', JSON.stringify({ token: 'b'.repeat(64), port: 18242, migrationVersion: 1, paused: true, historyStartedAt: now,
-        status: { ...run, results: undefined, nextSync: now + 3600000 }, activeProgress: 'progress:legacy-native',
-        'progress:legacy-native': { key: 'progress:legacy-native', index: 1, offset: 0, items: [{ id: 'one' }, { id: 'two' }], full: false, currentId: null, run, pending: { schema_version: 1, account, captured_at: new Date(now).toISOString(), conversation: body('two') } },
-        'run:legacy-native': run, runs: [run] }));
+      if (!localStorage.getItem('fixture')) localStorage.setItem('fixture', JSON.stringify({ token: 'b'.repeat(64), port: 18242, historyStartedAt: now, status: {} }));
       const read = () => JSON.parse(localStorage.getItem('fixture'));
       const listeners = [];
       let handler;
-      window.__metrics = { details: 0, queueWrites: 0 };
+      window.__metrics = { providerCalls: 0, details: 0, queueWrites: 0 };
       const nativePut = IDBObjectStore.prototype.put;
       IDBObjectStore.prototype.put = function(value, key) { if (this.name === 'pending') window.__metrics.queueWrites++; return nativePut.call(this, value, key); };
       window.chrome = { storage: { local: {
         async get(keys) { const data = read(); return keys === null ? data : Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter(k => k in data).map(k => [k, data[k]])); },
         async set(values) { const data = read(); const changes = {}; for (const [key, value] of Object.entries(values)) { changes[key] = { oldValue: data[key], newValue: value }; data[key] = value; } localStorage.setItem('fixture', JSON.stringify(data)); queueMicrotask(() => listeners.forEach(fn => fn(changes, 'local'))); },
         async remove(keys) { const data = read(); for (const key of Array.isArray(keys) ? keys : [keys]) delete data[key]; localStorage.setItem('fixture', JSON.stringify(data)); },
-      }, onChanged: { addListener(fn) { listeners.push(fn); } } }, alarms: { async create() {}, onAlarm: { addListener() {} } }, runtime: {
+      }, onChanged: { addListener(fn) { listeners.push(fn); } } }, runtime: {
         id: 'native', getURL: p => `chrome-extension://native/${p}`, onMessage: { addListener(fn) { handler = fn; } },
         async sendMessage(message) { await window.__background; return new Promise(resolve => handler(message, { id: 'native', url: 'chrome-extension://native/popup.html' }, resolve)); },
       }, tabs: { query: async () => [{ url: 'https://chatgpt.com/c/one' }], create: async () => {} } };
       const nativeFetch = window.fetch;
       const reply = value => ({ ok: true, status: 200, json: async () => value });
       window.fetch = async (url, options) => {
+        if (url.includes('chatgpt.com')) window.__metrics.providerCalls++;
         if (url.endsWith('/health')) return reply({ app: 'buddy', schema_version: 1, storage_id: 'native', storage_path: '/archive/chatgpt' });
         if (url.endsWith('/api/auth/session')) return reply({ accessToken: 'synthetic', user: { id: 'synthetic-user' } });
         if (url.includes('/conversations?')) return reply({ total: 2, items: ['one', 'two'].map(id => ({ id, update_time: 100 })) });
@@ -53,31 +49,42 @@ const root = path.resolve(__dirname, '..');
         return nativeFetch(url, options);
       };
       window.__background = import('/background.js');
-    }, { account });
+    });
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     const base = `http://127.0.0.1:${server.address().port}`;
     await page.goto(`${base}/popup.html`);
-    await page.waitForFunction(() => document.querySelector('#headline').textContent === 'Automatic archiving paused');
+    await page.waitForFunction(() => document.querySelector('#headline').textContent === 'Manual sync');
     await page.evaluate(() => chrome.runtime.sendMessage({ type: 'health' }));
-    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('fixture')).activeProgress), undefined);
-    const queueWrites = await page.evaluate(() => window.__metrics.queueWrites);
-    await page.locator('#pause').click();
-    await page.waitForFunction(() => JSON.parse(localStorage.getItem('fixture')).status.state === 'completed');
-    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('fixture')).status.checked), 2);
-    assert.equal(await page.evaluate(() => window.__metrics.details), 0, 'recovery delivers the migrated queue without refetching');
-    assert.equal(await page.evaluate(() => window.__metrics.queueWrites), queueWrites, 'recovery does not rewrite the payload');
-    assert.equal(await page.evaluate(async () => { const db = await import('/store.js'); return db.get('pending', 'progress:legacy-native'); }), undefined);
+    assert.equal(await page.evaluate(() => window.__metrics.providerCalls), 0);
+    assert.equal(await page.locator('#pause').count(), 0);
+    assert.equal(await page.locator('#migration').count(), 0);
+    await page.locator('#settingsToggle').click();
+    await page.locator('#connect').click();
+    await page.waitForFunction(() => document.querySelector('#setup').hidden);
+    assert.equal(await page.evaluate(() => window.__metrics.providerCalls), 0, 'connecting cannot start sync');
     await page.evaluate(() => { window.__hold = true; });
     await page.locator('#current').click();
     await page.waitForFunction(() => Boolean(window.__release));
     assert.equal(await page.locator('#sync').isDisabled(), true);
-    await page.locator('#pause').click();
+    await page.locator('#stop').click();
     await page.evaluate(() => { window.__hold = false; window.__release(); });
-    await page.waitForFunction(() => JSON.parse(localStorage.getItem('fixture')).status.state === 'paused');
-    await page.locator('#pause').click();
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('fixture')).status.state === 'stopped');
+    const pendingKey = await page.evaluate(async () => (await import('/store.js')).get('meta', 'activeProgress'));
+    assert.equal(await page.evaluate(() => window.__metrics.queueWrites), 1);
+    await page.reload();
+    await page.evaluate(() => chrome.runtime.sendMessage({ type: 'health' }));
+    assert.equal(await page.evaluate(() => window.__metrics.providerCalls), 0, 'reload cannot continue the queued task');
+    await page.waitForFunction(() => document.querySelector('#sync').textContent === 'Continue sync');
+    await page.locator('#sync').click();
     await page.waitForFunction(() => JSON.parse(localStorage.getItem('fixture')).status.state === 'completed');
+    assert.equal(await page.evaluate(() => window.__metrics.details), 0, 'manual continuation uses the queued snapshot');
+    assert.equal(await page.evaluate(() => window.__metrics.queueWrites), 0, 'continuation does not rewrite the payload');
+    assert.equal(await page.evaluate(async key => (await import('/store.js')).get('pending', key), pendingKey), undefined);
+    await page.waitForFunction(() => document.querySelector('#sync').textContent === 'Sync now');
+    await page.locator('#sync').click();
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('fixture')).status.state === 'completed' && JSON.parse(localStorage.getItem('fixture')).status.scope === 'incremental');
     await page.setViewportSize({ width: 1100, height: 900 });
     await page.goto(`${base}/history.html`);
     await page.locator('#archives details').first().waitFor();
@@ -92,7 +99,7 @@ const root = path.resolve(__dirname, '..');
     assert.equal(await page.locator('#runs details').count(), 2, 'task history survives a new document/worker instance');
     await page.emulateMedia({ colorScheme: 'dark' });
     assert.deepEqual(errors, []);
-    console.log('Native Chromium smoke passed: IndexedDB migration, queued recovery without refetch/rewrite, pause/resume, safe archive titles, paged task history, timing display, and reload persistence.');
+    console.log('Native Chromium smoke passed: no sync on connect or reload, explicit stop/continue without rewriting snapshots, safe archive titles, paged history, timings, and persistence.');
     await context.close();
   } finally { await browser?.close(); server.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

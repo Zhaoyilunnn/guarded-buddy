@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import * as db from "../store.js";
 
 test("snapshots are queued once, stage writes remain small, and unchanged details use bounded verification", async () => {
-  const local = { port: 18242, token: "b".repeat(64), migrationVersion: 1, status: { nextSync: Date.now() + 3600000 } };
+  const local = { port: 18242, token: "b".repeat(64), status: {} };
   const ids = Array.from({ length: 8 }, (_, i) => `sample-${i}`);
   let listener;
   let details = 0;
@@ -26,7 +26,7 @@ test("snapshots are queued once, stage writes remain small, and unchanged detail
     async get(keys) { return structuredClone(keys === null ? local : Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter(k => k in local).map(k => [k, local[k]]))); },
     async set(values) { const size = Buffer.byteLength(JSON.stringify(values)); bytes += size; metadataMax = Math.max(metadataMax, size); assert.ok(size < 65536); Object.assign(local, structuredClone(values)); },
     async remove(keys) { for (const k of Array.isArray(keys) ? keys : [keys]) delete local[k]; },
-  } }, alarms: { async create() {}, onAlarm: { addListener() {} } }, runtime: { id: "bench", getURL: p => `chrome-extension://bench/${p}`, onMessage: { addListener(fn) { listener = fn; } } } };
+  } }, runtime: { id: "bench", getURL: p => `chrome-extension://bench/${p}`, onMessage: { addListener(fn) { listener = fn; } } } };
   const reply = value => ({ ok: true, status: 200, json: async () => value });
   globalThis.fetch = async url => {
     if (url.endsWith("/health")) return reply({ app: "buddy", schema_version: 1, storage_id: "bench" });
@@ -64,7 +64,7 @@ test("snapshots are queued once, stage writes remain small, and unchanged detail
     assert.ok(Number.isFinite(record.timings.commitMs));
     clock += 15 * 60000;
     await run();
-    assert.equal(details, 16, "the next periodic check skips unchanged details");
+    assert.equal(details, 16, "a later manual check skips unchanged details");
     clock += 24 * 3600000;
     await run();
     assert.equal(details, 21, "old unchanged details have a five-item verification budget");

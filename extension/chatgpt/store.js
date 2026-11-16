@@ -84,37 +84,3 @@ export async function prune(before) {
     };
   });
 }
-export async function migrate() {
-  if ((await chrome.storage.local.get("storageVersion")).storageVersion === 2) return;
-  const local = await chrome.storage.local.get(null);
-  const oldKeys = Object.keys(local).filter(k => /^(progress:|checkpoints:|run:)/.test(k) || ["runs", "pending", "activeProgress", "currentProgress"].includes(k));
-  if (!await get("meta", "migrated")) {
-    const commands = [];
-    const addRun = run => {
-      const { results = [], ...summary } = run;
-      commands.push(put("runs", run.id, summary));
-      for (const result of results) commands.push(put("results", [run.id, result.id], { ...result, taskId: run.id }));
-    };
-    for (const key of oldKeys) {
-      const value = local[key];
-      if (key.startsWith("run:")) addRun(value);
-      else if (key === "runs") {
-        for (const summary of value) if (!local[`run:${summary.id}`]) addRun(summary);
-      } else if (key.startsWith("progress:")) {
-        const { pending, run, ...progress } = value;
-        const summary = run && { ...run };
-        if (summary) { delete summary.results; addRun(run); }
-        commands.push(put("progress", key, { ...progress, ...(summary ? { run: summary } : {}) }));
-        if (pending) commands.push(put("pending", key, pending));
-      } else if (key.startsWith("checkpoints:")) {
-        for (const [id, checkpoint] of Object.entries(value)) commands.push(put("checkpoints", [key, id], checkpoint));
-      } else if (["activeProgress", "currentProgress"].includes(key)) commands.push(put("meta", key, value));
-      else if (key === "pending") commands.push(put("pending", "legacy", value));
-    }
-    commands.push(put("meta", "migrated", true));
-    await commit(commands);
-  }
-  // Remove legacy data only after the entire import transaction commits.
-  await chrome.storage.local.remove(oldKeys);
-  await chrome.storage.local.set({ storageVersion: 2 });
-}

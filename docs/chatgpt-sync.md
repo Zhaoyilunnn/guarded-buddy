@@ -15,11 +15,11 @@ The browser uses its existing ChatGPT login. No OpenAI API key is required.
    mode, select **Load unpacked**, and choose this repository's `extension/chatgpt`
    directory. The extension is not distributed through a browser store.
 4. Open ChatGPT in that browser and sign in. Open the extension popup, paste the
-   token, and select **Connect and start automatic archiving**. The first sync
-   starts immediately after the receiver connection is verified.
-5. Automatic archiving checks accessible history every 15 minutes while the
-   browser is running. Use **Save current conversation** for the active saved
-   conversation, or **Sync now** for an immediate incremental check.
+   token, and select **Save and connect**. Connecting verifies and saves settings;
+   it does not start a sync.
+5. Select **Save current conversation** on a saved ChatGPT conversation, or
+   **Sync now** to check accessible history. All sync tasks require an explicit
+   button click. No scheduled syncs, startup syncs, or automatic task retries run.
 
 ```sh
 buddy web serve
@@ -164,19 +164,15 @@ distribution is already running uses the existing service. Systemd services
 the receiver runs while the distribution is active. This setup does not launch
 WSL automatically when Windows starts.
 
-## Upgrade
+## Updating the extension
 
 After updating the repository, run `cargo install --path .`, restart the running
 `buddy web serve` process (or its systemd service), and reload the unpacked
-extension in `chrome://extensions`. Version 0.3.0 needs the updated receiver for
-archive browsing and Markdown status. Existing JSON files remain the archive
-source; existing extension pagination and pending delivery are recovered when
-possible. Version 0.3.0 transactionally imports old browser queues, progress,
-checkpoints, and task results into IndexedDB, then removes the old copies. A
-failed or interrupted import retains the source data and can resume without
-overwriting already imported records. Settings and explicit pauses are preserved.
-Recovered legacy tasks identify items checked before the update; their
-earlier per-item outcomes are unavailable. Explicit pauses made in this version survive subsequent reloads.
+extension in `chrome://extensions`. Version 0.4.0 is manual-only and does not
+import old `chrome.storage.local` queues, checkpoints, or task histories. There
+are no legacy settings or queue migration paths. Current IndexedDB records use
+their existing schema directly. Disk JSON and Markdown archives remain available
+through the receiver, independently of browser state.
 
 ## Storage and report behavior
 
@@ -265,18 +261,23 @@ message truncation and secret redaction apply.
 After pairing, the popup shows the current stage, checked/total counts when the
 provider supplies a total, the current conversation title, and separate new,
 updated, and unchanged counts. Unknown totals use an indeterminate progress bar.
-Completion, interruption, and failures are explicit; the last successful sync
-and the next scheduled check or retry are shown separately. Receiver checks carry
+Completion, interruption, and failures are explicit, and the last successful
+sync time remains visible. Receiver checks carry
 a timestamp rather than claiming continuous connectivity.
 
-Automatic archiving is enabled by default and is not an optional setup checkbox.
-Upgrading an older installation enables it once and shows a notice. Thereafter,
-**Pause automatic archiving** persists across browser restarts and suppresses both
-periodic work and recovery. A pause finishes any in-flight operation before
-stopping at the next safe boundary. **Resume automatic archiving** immediately
-continues pending work or starts a new check. A manual current-conversation save
-can run while automatic work is paused; it preserves the paused history task.
-Only one sync executes at a time.
+Sync is manual-only. **Save and connect**, browser startup, extension reloads,
+and popup/archive browsing do not fetch ChatGPT conversations. There is no alarm
+permission or background scheduler. **Sync now**, **Save current conversation**,
+and **Recheck all history** start a task. Only one unfinished task is tracked;
+finish or discard it before starting a different task or changing the connection.
+
+**Stop current sync** finishes the in-flight operation and stops at the next safe
+boundary. The saved cursor and pending payload remain. **Continue sync** is an
+explicit manual action that continues a stopped, failed, or interrupted task.
+Worker/browser restart marks an in-flight task as interrupted and never resumes
+its requests. Closing the popup allows a manually started task to keep running
+while its worker remains alive. There is no pause/resume setting for automatic
+work because no automatic work is scheduled.
 
 **View all** opens the archive manager:
 
@@ -288,7 +289,7 @@ Only one sync executes at a time.
   does not open arbitrary local files. **Save again** requires the matching
   ChatGPT account to be signed in. **Refresh** reads the latest disk state.
 - **Sync tasks** shows trigger, scope, original account/destination, timestamps,
-  counts, and per-conversation results. Task IDs and counters survive recovery.
+  counts, and per-conversation results. Task IDs and counters survive manual continuation.
   Unchanged counts include identical content, recently verified checkpoints, and
   ignored older revisions; task details distinguish these outcomes. A failed
   item is replaced by its eventual result when retried. Task details contain
@@ -299,7 +300,7 @@ Only one sync executes at a time.
   Timing data can be partial for recovered items; it is not invented for earlier work. Unfinished tasks remain until
   completed or discarded. Uninstalling the extension removes these task records,
   but the disk archive remains discoverable after reconnecting. Older task
-  history cannot be reconstructed; recording starts with the upgrade.
+  history cannot be reconstructed.
 
 Settings hold the pairing credential and receiver port. Receiver details show the
 actual storage directory and whether an archive directory is configured. A cloud
@@ -316,9 +317,9 @@ The index accelerates lookup; revision comparison and atomic writes remain the
 source of truth.
 
 **More** contains **Recheck all history** and **Discard unfinished tasks**.
-Discard requires pausing and waiting for the current operation to finish. It
-removes pending browser deliveries and recovery cursors, retains completed files
-and task records, and leaves automatic work paused. Use it when abandoning an
+Discard requires stopping a running task and waiting for its current operation
+to finish. It removes pending browser deliveries and task cursors, and retains
+completed files and task records. Use it when abandoning an
 unfinished task before changing accounts or destinations. A queued task refuses
 to deliver to a different storage identity or logged-in account. Connection
 settings cannot change while unfinished work exists.
@@ -327,14 +328,13 @@ settings cannot change while unfinished work exists.
 
 - **Sync now** compares list update timestamps with locally acknowledged
   revisions and reads details for changed or unrecognized conversations. Matching
-  unchanged conversations are skipped during ordinary 15-minute checks. To catch
+  unchanged conversations are skipped during incremental manual checks. To catch
   content changes absent from list timestamps, each history task verifies at most
   five unchanged conversations last verified at least 24 hours ago. A persistent
   list-position cursor rotates this budget, wrapping at the end so earlier entries
   cannot permanently consume it. Thus verification latency grows with archive
   size; use a current-conversation save or full recheck for immediate verification.
-  Provider requests bypass the browser HTTP cache. Legacy checkpoints without a
-  verification time are revalidated once. The popup distinguishes list entries
+  Provider requests bypass the browser HTTP cache. The popup distinguishes list entries
   checked from conversation details actually read, and exposes provider backoff.
 - **Recheck all history** fetches every listed conversation regardless of the
   checkpoint. Use it after restoring/deleting the local archive or if a provider
@@ -353,19 +353,20 @@ settings cannot change while unfinished work exists.
 - Pagination position and per-conversation acknowledgements are scoped to the
   receiver's storage identity and survive extension worker suspension. Changing
   the storage directory starts fresh checkpoints, so a previous destination's
-  acknowledgements cannot skip delivery to the new destination. A one-minute alarm checks for incomplete or overdue work. Interrupted items may
-  be replayed safely. An explicit pause prevents scheduled work and recovery.
-- Provider 429/5xx responses use bounded retries with backoff. Failed syncs retain
-  their progress and retry after 15 minutes; the popup displays the failure.
+  acknowledgements cannot skip delivery to the new destination. Interrupted items may be replayed safely only after
+  **Continue sync** is selected.
+- Provider 429/5xx responses use bounded retries with backoff. Failed tasks retain
+  their progress and wait for **Continue sync**; the popup displays the failure.
+  Bounded HTTP retries with backoff occur only inside an explicitly started task.
   A failed conversation stops that run at its checkpoint. Login failures require
   signing in again. A queued snapshot for another account requires returning to
   that account before recovery can finish.
-- The browser must be running for alarms to run. Closing the popup does not
-  cancel synchronization. Browser startup checks for interrupted and overdue
-  tasks. The receiver must be reachable for delivery.
+- Closing the popup does not cancel a manually started task. If its worker is
+  terminated, it waits for manual continuation. Browser startup never starts or
+  continues sync. The receiver must be reachable for delivery.
 - HTTP 413 means a snapshot exceeds the receiver's request size limit. Increase
-  `[web] max_body_mib` or pass `--max-body-mib`, restart the receiver, and retry
-  **Sync now**. The queued snapshot is retained for redelivery. A failed local
+  `[web] max_body_mib` or pass `--max-body-mib`, restart the receiver, and select
+  **Continue sync**. The queued snapshot is retained for redelivery. A failed local
   network request also shows the upload size and identifies the Buddy receiver;
   a connection closed during an oversized upload may appear as a network failure
   rather than HTTP 413. No conversation payloads or credentials are logged.
@@ -377,7 +378,7 @@ It validates the Host, bearer token, and any supplied Origin, and exposes no COR
 access to ordinary websites. Storage paths and filenames are constrained, symlink
 storage destinations are rejected, and newly created files/directories are private
 on Unix. Run one receiver per HOME. The extension requests `unlimitedStorage` for
-large pending snapshots, plus storage, alarms, active-tab access, and access to
+large pending snapshots, plus storage, active-tab access, and access to
 ChatGPT and the loopback receiver. Conversation data is not encrypted by buddy.
 
 ## Protocol and limitations
@@ -411,8 +412,8 @@ sequenceDiagram
     participant Report as Weekly report collector
 
     User->>Extension: Pair with buddy web pair token
-    Extension->>Extension: Start automatic archiving after pairing; repeat every 15 minutes
-    User->>Extension: Save current / Sync now / Pause or resume
+    Note over Extension: Pairing and startup never start sync
+    User->>Extension: Save current / Sync now / Recheck all / Continue sync
     Extension->>Receiver: Authenticated health check
     Extension->>ChatGPT: Use browser login to list and fetch conversations
     Extension->>Extension: Insert independent pending snapshot once in IndexedDB
@@ -448,8 +449,9 @@ node extension/chatgpt/tests/performance.test.js
 Rust integration tests exercise a real loopback receiver, authentication, atomic
 updates, archival, branch filtering, latest-snapshot selection, CLI collection,
 and weekly-report ingestion. Extension tests mock provider/receiver responses and
-browser storage, including automatic pairing sync, offline delivery, worker
-restart, pause/resume, destination/account isolation, and persistent task results.
+browser storage, including no-op startup and pairing, manual sync, offline
+delivery, explicit stop/continue, worker interruption without automatic restart,
+destination/account isolation, and persistent task results.
 Receiver tests cover authenticated catalog search, pagination, disk reconciliation,
 conversion states, and retry validation. They do not
 replace a live test in an authenticated browser account.
@@ -466,18 +468,18 @@ node extension/chatgpt/tests/browser-smoke.cjs
 
 If Playwright or Chromium are installed elsewhere, set `BUDDY_PLAYWRIGHT_MODULE`
 to the Playwright module path and `BUDDY_CHROMIUM_EXECUTABLE` to the browser binary.
-The test covers pending-queue migration, pause/resume, recovery without rewriting
-the queued body, history persistence across reloads, timing display, and safe
-rendering of conversation titles. It does not use a real ChatGPT login.
+The test covers idle pairing and startup, explicit stop/continue without
+rewriting the queued body, no automatic requests after reload, history persistence,
+timing display, and safe rendering of conversation titles. It does not use a real ChatGPT login.
 
 ### Storage performance regression
 
 The performance test instruments actual database-record writes with an IndexedDB
 emulator and measures serialized value sizes, rather than disk write amplification
 or network latency. For two forced full checks of eight synthetic 512 KiB
-snapshots, version 0.2.0 wrote approximately 16.3 MiB; version 0.3.0 writes about
+snapshots, version 0.2.0 wrote approximately 16.3 MiB; the current version writes about
 8.22 MiB, with one queue insertion per fetched snapshot and small phase records.
-The ordinary check 15 minutes later makes no detail requests for unchanged items.
+A subsequent manual incremental check makes no detail requests for unchanged items.
 Tests also verify bounded old-detail rotation, acknowledgement rollback, expired
-result pruning, and restartable migration. These figures are a local regression
+result pruning, and manual-only continuation. These figures are a local regression
 budget, not a claim of a fixed end-to-end speedup on a real account.

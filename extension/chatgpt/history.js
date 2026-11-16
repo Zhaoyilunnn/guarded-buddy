@@ -90,7 +90,6 @@ async function runs() {
     detail(list, "Started", date(run.startedAt));
     detail(list, "Finished", run.endedAt ? date(run.endedAt) : "Not finished");
     detail(list, "Checked", `${run.checked || 0}${run.total != null ? ` / ${run.total}` : ""}`);
-    if (run.previouslyChecked) detail(list, "Before this update", `${run.previouslyChecked} checked; earlier per-item outcomes are unavailable`);
     detail(list, "Details read", String(run.detailsRead || 0));
     detail(list, "Failed", String(run.failed || 0));
     detail(list, "Identical content", String(run.unchanged || 0));

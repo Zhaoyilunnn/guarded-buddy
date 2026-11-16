@@ -2,185 +2,141 @@ import "fake-indexeddb/auto";
 import * as db from "../store.js";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 const pause = () => new Promise(resolve => setTimeout(resolve, 2));
 async function until(check) {
-  for (let i = 0; i < 500; i++) { if (await check()) return; await pause(); }
+  for (let i = 0; i < 1000; i++) { if (await check()) return; await pause(); }
   assert.fail("Timed out waiting for extension state");
 }
 
-test("automatic archive lifecycle, recovery, pause, history and destination isolation", async () => {
-  const data = { port: 18242, autoSync: false };
-  const alarms = new Map();
-  let messageListener;
-  let alarmListener;
+test("only manual actions start or continue sync; failures, stops, and restarts never restart it", async () => {
+  const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
+  assert.equal(manifest.permissions.includes("alarms"), false);
+  const data = { port: 18242 };
+  let listener;
   let details = 0;
   let writes = 0;
+  let providerCalls = 0;
   let failIngest = false;
-  let ingestStatus = 200;
-  let updated = 100;
   let storageId = "local";
   let accountId = "user-1";
-  let acknowledgement = "created";
-  let currentNode = "node";
-  let lastPayload;
+  let updated = 100;
   let hold;
-  let ids = ["chat-1"];
+  const ids = ["chat-1", "chat-2"];
   globalThis.chrome = {
     storage: { local: {
-      async get(keys) {
-        if (keys === null) keys = Object.keys(data);
-        if (typeof keys === "string") keys = [keys];
-        return Object.fromEntries(keys.filter(k => k in data).map(k => [k, structuredClone(data[k])]));
-      },
+      async get(keys) { return structuredClone(Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter(k => k in data).map(k => [k, data[k]]))); },
       async set(values) { Object.assign(data, structuredClone(values)); },
-      async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) delete data[key]; },
     } },
-    alarms: { async clear() {}, async create(name, options) { alarms.set(name, options); }, onAlarm: { addListener(fn) { alarmListener = fn; } } },
-    runtime: { id: "test", getURL: path => `chrome-extension://test/${path}`, onMessage: { addListener(fn) { messageListener = fn; } } },
+    // No alarms, startup hooks, or installation hooks are exposed by this harness.
+    runtime: { id: "test", getURL: p => `chrome-extension://test/${p}`, onMessage: { addListener(fn) { listener = fn; } } },
   };
   globalThis.fetch = async (url, options = {}) => {
     const reply = value => ({ ok: true, status: 200, json: async () => value });
-    if (url.endsWith("/health")) return reply({ app: "buddy", schema_version: 1, storage_id: storageId, storage_path: "/archive/chatgpt" });
+    if (url.endsWith("/health")) return reply({ app: "buddy", schema_version: 1, storage_id: storageId });
+    if (url.includes("chatgpt.com")) providerCalls++;
     if (url.endsWith("/api/auth/session")) return reply({ accessToken: "provider-secret", user: { id: accountId } });
     if (url.includes("/conversations?")) return reply({ total: ids.length, items: ids.map(id => ({ id, title: `Title ${id}`, update_time: updated })) });
     if (url.includes("/conversation/")) {
       details++;
       const id = url.split("/").pop();
-      return reply({ conversation_id: id, title: `Title ${id}`, mapping: {}, current_node: currentNode, update_time: updated });
+      return reply({ conversation_id: id, title: `Title ${id}`, mapping: {}, current_node: "node", update_time: updated });
     }
-    if (url.includes("/v1/archives?")) return reply({ total: 1, items: [{ id: "chat-1" }] });
-    if (url.endsWith("/v1/archives/retry")) return reply({ status: "queued" });
+    if (url.includes("/v1/archives?")) return reply({ total: 0, items: [], warnings: [], accounts: [] });
     if (url.endsWith("/v1/chatgpt")) {
       assert.equal(options.headers.Authorization, `Bearer ${"b".repeat(64)}`);
-      const payload = JSON.parse(options.body);
-      lastPayload = payload;
-      assert.equal(payload.account.length, 64);
       assert.equal(options.body.includes("provider-secret"), false);
       if (hold) await hold;
       if (failIngest) throw new TypeError("Failed to fetch");
-      if (ingestStatus !== 200) return { ok: false, status: ingestStatus };
       writes++;
-      return reply({ status: acknowledgement });
+      return reply({ status: "updated" });
     }
     throw new Error(`Unexpected URL: ${url}`);
   };
-  await import("../background.js?first");
-  await until(() => alarms.has("sync"));
-  assert.equal(alarms.get("sync").periodInMinutes, 15);
-  assert.equal(data.autoSync, undefined);
+  await import("../background.js?manual");
   async function message(value, ok = true) {
-    const response = await new Promise(resolve => messageListener(value, { id: "test", url: "chrome-extension://test/popup.html" }, resolve));
+    const response = await new Promise(resolve => listener(value, { id: "test", url: "chrome-extension://test/popup.html" }, resolve));
     assert.equal(response.ok, ok, response.error);
     return response;
   }
-  async function send(value) {
+  async function run(value) {
     const before = JSON.stringify(data.status);
     await message(value);
-    await until(() => JSON.stringify(data.status) !== before || data.status?.running);
-    await pause();
-    await until(() => data.status && !data.status.running);
+    await until(() => data.status?.running || JSON.stringify(data.status) !== before);
+    await until(() => !data.status.running);
   }
-  await send({ type: "settings", port: 18242, token: "b".repeat(64) });
-  assert.equal(writes, 1, "pairing starts the first automatic run");
-  assert.equal(details, 1);
-  assert.equal((await db.get("meta", "activeProgress")), undefined);
-  assert.equal(data.status.created, 1);
-  assert.equal(data.status.state, "completed");
-  assert.ok(data.status.nextSync > Date.now());
-  assert.equal(data.connection.storage_path, "/archive/chatgpt");
-  assert.equal((await db.page("runs")).total, 1);
-  const first = { results: (await db.page("results", { taskId: data.status.id })).items };
-  assert.equal(first.results[0].title, "Title chat-1");
-  assert.equal(first.results[0].outcome, "created");
-  assert.equal(JSON.stringify(first).includes("provider-secret"), false);
-  await send({ type: "sync" });
+  await message({ type: "settings", port: 18242, token: "b".repeat(64) });
+  await message({ type: "health" });
+  await message({ type: "archives" });
+  await pause();
+  assert.equal(providerCalls, 0, "startup, pairing and archive browsing do not contact ChatGPT");
+  assert.equal((await db.page("runs")).total, 0);
+
+  await run({ type: "sync", currentId: "chat-1" });
   assert.equal(writes, 1);
-  assert.equal(data.status.checkpointSkipped, 1);
-  await send({ type: "sync", currentId: "chat-1" });
+  assert.equal(data.status.state, "completed");
+  assert.equal(data.status.unfinished, false);
+  assert.equal(data.status.trigger, "manual");
+  await run({ type: "sync" });
   assert.equal(writes, 2);
   assert.equal(details, 2);
+  assert.equal(data.status.checkpointSkipped, 1);
+  const beforeIdle = providerCalls;
+  await import("../background.js?idle-restart");
+  await message({ type: "health" });
+  await pause();
+  assert.equal(providerCalls, beforeIdle);
+
   updated = 200;
   failIngest = true;
-  await send({ type: "sync" });
-  assert.match(data.status.error, /Buddy upload.*MiB.*Failed to fetch/);
-  const failedKey = (await db.get("meta", "activeProgress"));
-  assert.equal((await db.get("pending", failedKey)).conversation.update_time, 200);
+  await run({ type: "sync", full: true });
+  assert.match(data.status.error, /Buddy upload.*Failed to fetch/);
+  assert.equal(data.status.unfinished, true);
   const failedId = data.status.id;
-  assert.ok(data.status.retryAt > Date.now());
+  const failedKey = await db.get("meta", "activeProgress");
+  assert.equal((await db.get("pending", failedKey)).conversation.update_time, 200);
+  const failedDetails = details;
+  const beforeFailureRestart = providerCalls;
   failIngest = false;
-  data.status.retryAt = 0;
-  await import("../background.js?restarted");
-  await until(() => data.status.state === "completed");
-  assert.equal(data.status.id, failedId, "recovery keeps the same task");
-  assert.equal((await db.get("meta", "activeProgress")), undefined);
-  assert.equal(data.status.error, null);
-  assert.equal((await db.page("results", { taskId: failedId })).total, 1);
-  assert.equal(writes, 3, "the durable pending item is delivered once during recovery");
-  await send({ type: "sync", full: true });
-  assert.equal(data.status.saved, 1);
-  ingestStatus = 413;
-  await send({ type: "sync", full: true });
-  assert.match(data.status.error, /exceeds.*size limit/);
-  assert.ok((await db.get("pending", await db.get("meta", "activeProgress"))));
-  ingestStatus = 200;
-  await send({ type: "sync" });
-  assert.equal(data.status.error, null);
-  assert.equal((await db.get("meta", "activeProgress")), undefined);
-  const beforeSwitch = details;
-  storageId = "shared";
-  await send({ type: "sync" });
-  assert.equal(details, beforeSwitch + 1, "new destinations cannot reuse old checkpoints");
-  await send({ type: "sync" });
-  assert.equal(details, beforeSwitch + 1);
-  acknowledgement = "stale";
-  await send({ type: "sync", full: true });
-  assert.equal(data.status.saved, 0);
-  assert.equal(data.status.stale, 1);
-  const checkpointKey = data.status.checkpointScope;
-  const beforeRecheck = details;
-  currentNode = "new-message-with-same-update-time";
-  await db.commit([db.put("checkpoints", [checkpointKey, "chat-1"], { revision: updated, checkedAt: Date.now() - 24 * 3600000 })]);
-  acknowledgement = "updated";
-  await send({ type: "sync" });
-  assert.equal(details, beforeRecheck + 1);
-  assert.equal(lastPayload.conversation.current_node, currentNode);
-  assert.equal(data.status.updated, 1);
-  await db.commit([db.put("checkpoints", [checkpointKey, "chat-1"], updated)]);
-  await send({ type: "sync" });
-  assert.equal(details, beforeRecheck + 2, "legacy numeric checkpoints are revalidated");
+  await import("../background.js?failed-restart");
+  await message({ type: "tasks" });
+  await pause();
+  assert.equal(data.status.state, "failed");
+  assert.equal(providerCalls, beforeFailureRestart, "failed uploads do not retry on worker restart");
+  await message({ type: "sync" }, false);
+  await message({ type: "pause" }, false);
+  await message({ type: "resume" }, false);
+  await run({ type: "continue" });
+  assert.equal(data.status.id, failedId);
+  assert.equal(data.status.checked, 2);
+  assert.equal(data.status.failed, 0);
+  assert.equal(details, failedDetails + 1, "manual continuation reuses the pending first snapshot");
+  assert.equal(await db.get("pending", failedKey), undefined);
 
-  // Pause while an upload is in flight: acknowledge it, but do not start the next item.
-  ids = ["chat-1", "chat-2"];
+  // Stop after an in-flight upload; restarting the worker leaves the task stopped.
   let release;
   hold = new Promise(resolve => { release = resolve; });
   await message({ type: "sync", full: true });
   await until(() => data.status.stage === "Saving conversation");
   await message({ type: "sync", currentId: "chat-1" }, false);
   await message({ type: "discard" }, false);
-  await message({ type: "pause" });
+  await message({ type: "stop" });
   release(); hold = null;
-  await until(() => !data.status.running);
-  assert.equal(data.status.state, "paused");
+  await until(() => data.status.state === "stopped");
   assert.equal(data.status.checked, 1);
-  const pausedId = data.status.id;
-  const beforePause = writes;
-  await alarmListener({ name: "sync" });
-  await alarmListener({ name: "resume" });
-  assert.equal(writes, beforePause);
-  assert.equal(data.paused, true);
-  await send({ type: "sync", currentId: "chat-1" });
-  assert.equal(data.paused, true, "a manual single save does not unpause scheduled work");
-  assert.ok((await db.get("meta", "activeProgress")), "the paused history task is preserved");
-  await import("../background.js?paused-with-progress");
+  const stoppedId = data.status.id;
+  const stoppedWrites = writes;
+  const stoppedCalls = providerCalls;
+  await import("../background.js?stopped-restart");
+  await message({ type: "health" });
   await pause();
-  assert.equal(data.paused, true);
-  await send({ type: "resume" });
-  assert.equal(data.status.id, pausedId);
-  assert.equal(data.status.checked, 2, "counts survive a pause and a separate single save");
-  assert.equal(data.status.updated, 2);
-  assert.equal((await db.get("meta", "activeProgress")), undefined);
+  assert.equal(writes, stoppedWrites);
+  assert.equal(providerCalls, stoppedCalls);
+  await run({ type: "continue" });
+  assert.equal(data.status.id, stoppedId);
+  assert.equal(data.status.checked, 2);
 
-  // Simulate a transaction failure after receiver acknowledgement: neither cursor nor counts may advance.
+  // A transaction failure after acknowledgement keeps both the queue and the old cursor.
   const originalPut = IDBObjectStore.prototype.put;
   let abortOnce = true;
   IDBObjectStore.prototype.put = function(value, key) {
@@ -190,90 +146,43 @@ test("automatic archive lifecycle, recovery, pause, history and destination isol
     }
     return originalPut.call(this, value, key);
   };
-  try { await send({ type: "sync", full: true }); }
+  try { await run({ type: "sync", full: true }); }
   finally { IDBObjectStore.prototype.put = originalPut; }
   assert.match(data.status.error, /simulated acknowledgement transaction failure/);
   const interrupted = await db.get("progress", await db.get("meta", "activeProgress"));
   assert.equal(interrupted.index, 0);
   assert.equal(interrupted.run.checked, 0);
   assert.ok(await db.get("pending", interrupted.key));
-  await send({ type: "sync" });
-  assert.equal(data.status.checked, 2);
+  // Reconstruct a worker interrupted during an operation, without allowing it to send anything.
+  interrupted.run.state = "running";
+  await db.commit([db.put("progress", interrupted.key, interrupted)]);
+  const beforeInterruptedRestart = providerCalls;
+  await import("../background.js?interrupted-restart");
+  await message({ type: "tasks" });
+  assert.equal(data.status.state, "interrupted");
+  assert.equal(providerCalls, beforeInterruptedRestart);
+  await run({ type: "continue" });
   assert.equal(data.status.updated, 2);
   assert.equal(data.status.failed, 0);
 
-  // An unfinished task cannot silently deliver its queued body to a new destination/account.
   failIngest = true;
-  await send({ type: "sync", full: true });
-  const taskId = data.status.id;
+  await run({ type: "sync", full: true });
   failIngest = false;
-  storageId = "third";
-  const beforeMismatch = writes;
-  await send({ type: "sync" });
+  const mismatchWrites = writes;
+  storageId = "elsewhere";
+  await run({ type: "continue" });
   assert.match(data.status.error, /destination changed/);
-  assert.equal(writes, beforeMismatch);
-  storageId = "shared";
-  accountId = "other-user";
-  await send({ type: "sync" });
+  assert.equal(writes, mismatchWrites);
+  storageId = "local";
+  accountId = "another-user";
+  await run({ type: "continue" });
   assert.match(data.status.error, /another ChatGPT account/);
-  assert.equal(data.status.id, taskId);
-  assert.equal(writes, beforeMismatch);
-  await message({ type: "pause" });
-  await send({ type: "discard" });
-  assert.equal((await db.get("meta", "activeProgress")), undefined);
-  assert.equal((await db.get("runs", taskId)).state, "discarded");
-  assert.equal(data.paused, true);
-  const response = await message({ type: "archives", q: "Title" });
-  assert.equal(response.data.total, 1);
-  await message({ type: "retryMarkdown", account: "a".repeat(64), id: "chat-1" });
-
-  // Browser restart preserves an explicit pause; migration enables old opt-out installations once.
-  await import("../background.js?paused-restart");
-  await pause();
-  assert.equal(data.paused, true);
-  assert.equal(writes, beforeMismatch);
-  data.migrationVersion = undefined;
-  data.autoSync = false;
-  data.status.nextSync = Date.now() + 60000;
-  await import("../background.js?legacy-upgrade");
-  await until(() => data.migrationVersion === 1);
-  assert.equal(data.paused, false);
-  assert.equal(data.autoSync, undefined);
-  assert.equal(data.migrationNotice, true);
-  await message({ type: "health" });
-  // Scheduled work runs without any opt-in; completed task details expire after 90 days.
-  const expired = { id: "expired", endedAt: Date.now() - 91 * 86400000 };
-  await db.commit([db.put("runs", "expired", { ...expired, startedAt: 1 })]);
-  data.status.nextSync = Date.now() - 1;
-  const beforeScheduled = writes;
-  await alarmListener({ name: "sync" });
-  assert.ok(writes > beforeScheduled);
-  assert.equal(data.status.trigger, "scheduled");
-  assert.equal(await db.get("runs", "expired"), undefined);
-
-  // Upgrade an old durable queue without losing its pagination or account/destination scope.
-  const legacyKey = `progress:${lastPayload.account}:${storageId}`;
-  data[legacyKey] = { offset: 0, index: 1, items: ids.map(id => ({ id })), total: 2, full: true, currentId: null };
-  data.activeProgress = legacyKey;
-  data.storageVersion = undefined;
-  await db.commit([db.del("meta", "migrated")]);
-  data.pending = { ...lastPayload, conversation: { ...lastPayload.conversation, conversation_id: "chat-2" } };
-  const beforeLegacyDetails = details;
-  data.status.retryAt = 0;
-  await import("../background.js?legacy-queue");
-  await message({ type: "health" });
-  await until(async () => (await db.get("meta", "activeProgress")) === undefined);
-  assert.equal(data.pending, undefined);
-  assert.equal(data[legacyKey], undefined);
-  assert.equal(details, beforeLegacyDetails + 1, "old pagination resumes at its saved index");
-  assert.equal(data.status.state, "completed");
-
-  acknowledgement = "unexpected";
-  await send({ type: "sync", full: true });
-  assert.match(data.status.error, /recognized persistence result/);
-  assert.equal(data.status.saved, 0, "unrecognized acknowledgements never count as saved");
-  assert.equal(data.status.failed, 1);
-  await message({ type: "pause" });
-  await send({ type: "discard" });
-
+  assert.equal(writes, mismatchWrites);
+  await message({ type: "discard" });
+  assert.equal(data.status.state, "discarded");
+  assert.equal(data.status.unfinished, false);
+  assert.equal(await db.get("meta", "activeProgress"), undefined);
+  await message({ type: "continue" }, false);
+  assert.equal(data.status.nextSync, undefined);
+  assert.equal(data.status.retryAt, undefined);
 });

@@ -1,11 +1,10 @@
 import * as db from "./store.js";
 import { login, listPage, conversation, revision } from "./api.js";
 
-const interval = 15 * 60000;
 const retention = 90 * 86400000;
 let running = false;
 let stopRequested = false;
-const defaults = { port: 18242, token: "", paused: false };
+const defaults = { port: 18242, token: "" };
 async function settings() {
   return { ...defaults, ...await chrome.storage.local.get(Object.keys(defaults)) };
 }
@@ -58,7 +57,7 @@ async function health(config) {
 async function publish(progress, extra = {}, commands = []) {
   await db.commit([db.put("progress", progress.key, progress), db.put("runs", progress.run.id, progress.run), ...commands]);
   await status({ ...progress.run, saved: progress.run.created + progress.run.updated,
-    skipped: progress.run.unchanged + progress.run.stale + progress.run.checkpointSkipped, ...extra });
+    skipped: progress.run.unchanged + progress.run.stale + progress.run.checkpointSkipped, ...extra, unfinished: true });
 }
 
 async function phase(progress, stage, title = null) {
@@ -66,7 +65,7 @@ async function phase(progress, stage, title = null) {
   progress.run.currentTitle = title;
   progress.run.state = "running";
   progress.run.error = null;
-  await publish(progress, { running: true, error: null });
+  await publish(progress, { running: true, stopping: stopRequested, error: null });
 }
 
 async function result(progress, item, outcome, error = null, timings = {}) {
@@ -77,47 +76,41 @@ async function result(progress, item, outcome, error = null, timings = {}) {
   });
 }
 
-async function sync({ currentId = null, full = false, trigger = "manual", expectedAccount = null } = {}) {
-  if (running) return { busy: true };
+async function sync({ currentId = null, full = false, resume = false, expectedAccount = null } = {}) {
+  if (running) return;
   running = true;
   stopRequested = false;
   let progress;
-  let pointer;
+  const pointer = "activeProgress";
   try {
     const config = await settings();
-    if (config.paused && !currentId) return { paused: true };
-    const pointers = { activeProgress: await db.get("meta", "activeProgress"), currentProgress: await db.get("meta", "currentProgress") };
-    pointer = currentId ? "currentProgress" : (pointers.currentProgress ? "currentProgress" : "activeProgress");
-    const key = pointers[pointer];
-    if (key) progress = await db.get("progress", key);
-    if (progress && !progress.run) {
-      // Preserve old pagination; counters and task history begin with this upgrade.
-      progress = { ...progress, legacy: true };
-    }
-    if (progress?.run && currentId && progress.currentId !== currentId) {
-      throw new Error("Finish the pending single-conversation save before saving another conversation.");
-    }
-    if (!progress?.run) {
+    const key = await db.get("meta", pointer);
+    if (resume) {
+      if (!key) throw new Error("No unfinished task to continue.");
+      progress = await db.get("progress", key);
+      if (!progress) throw new Error("Task progress is missing. Discard the task and start a new sync.");
+    } else {
+      if (key) throw new Error("Continue or discard the unfinished task before starting another sync.");
       const id = crypto.randomUUID();
-      const legacyScope = progress?.legacy && key?.match(/^progress:([a-f0-9]{64}):(.+)$/);
-      progress = { ...progress, key: `progress:${id}`, offset: progress?.offset || 0,
-        index: progress?.index || 0, items: progress?.items || null, full: progress?.full || full,
-        currentId: progress?.currentId || currentId, expectedAccount,
-        run: { id, trigger, scope: (progress?.currentId || currentId) ? "conversation" : (progress?.full || full) ? "full" : "incremental",
-          startedAt: Date.now(), endedAt: null, total: progress?.total ?? null, error: null, currentTitle: null, state: "running", stage: "Connecting to Buddy",
-          checked: progress?.legacy ? (progress.offset || 0) + (progress.index || 0) : 0,
-          previouslyChecked: progress?.legacy ? (progress.offset || 0) + (progress.index || 0) : 0,
-          account: legacyScope ? legacyScope[1] : null, storageId: legacyScope ? legacyScope[2] : null,
+      progress = { key: `progress:${id}`, offset: 0, index: 0, items: null, full, currentId, expectedAccount,
+        run: { id, trigger: "manual", scope: currentId ? "conversation" : full ? "full" : "incremental",
+          startedAt: Date.now(), endedAt: null, total: null, error: null, currentTitle: null, state: "running", stage: "Connecting to Buddy",
+          checked: 0, account: null, storageId: null,
           created: 0, updated: 0, unchanged: 0, stale: 0, checkpointSkipped: 0, failed: 0, detailsRead: 0, verificationUsed: 0 } };
-      await publish(progress, { running: true }, [db.put("meta", pointer, progress.key)]);
-      if (key && key !== progress.key) await db.commit([db.del("progress", key)]);
+      await publish(progress, { running: true, stopping: false }, [db.put("meta", pointer, progress.key)]);
     }
-    if (progress.expectedAccount && expectedAccount && progress.expectedAccount !== expectedAccount) {
-      throw new Error("The pending task belongs to another account. Finish or discard it first.");
+    async function stopped() {
+      if (!stopRequested) return false;
+      progress.run.state = "stopped";
+      progress.run.stage = "Stopped";
+      await publish(progress, { running: false, stopping: false });
+      return true;
     }
     await phase(progress, "Connecting to Buddy");
     const info = await health(config);
-    const storageId = info.storage_id || "legacy";
+    if (await stopped()) return;
+    const storageId = info.storage_id;
+    if (typeof storageId !== "string" || !storageId) throw new Error("Buddy receiver did not provide a storage identity.");
     if (progress.run.storageId && progress.run.storageId !== storageId) {
       throw new Error("The destination changed during an unfinished task. Restore the previous destination or discard this task before syncing to the new one.");
     }
@@ -138,25 +131,13 @@ async function sync({ currentId = null, full = false, trigger = "manual", expect
     progress.run.checkpointScope = checkpointKey;
     const verificationKey = `verification:${checkpointKey}`;
     progress.run.verificationStart ??= await db.get("meta", verificationKey) || 0;
-    const legacyPending = await db.get("pending", "legacy");
-    if (legacyPending && !stopRequested) {
-      if (legacyPending.account !== auth.account) throw new Error("A pending snapshot belongs to another account. Sign in to that account to finish syncing.");
-      await receiver(config, "/v1/chatgpt", legacyPending);
-      await db.commit([db.del("pending", "legacy")]);
-    }
-    async function stopped() {
-      if (!stopRequested) return false;
-      progress.run.state = "paused";
-      progress.run.stage = "Paused";
-      await publish(progress, { running: false });
-      return true;
-    }
     if (await stopped()) return;
     while (true) {
       if (!progress.items) {
         await phase(progress, "Getting conversation list");
         if (progress.currentId) { progress.items = [{ id: progress.currentId }]; progress.run.total = 1; }
         else {
+          if (await stopped()) return;
           const page = await listPage(auth.token, progress.offset, wait => phase(progress, "Waiting for ChatGPT list retry", `${Math.ceil(wait / 1000)} seconds`));
           progress.items = page.items;
           progress.run.total = page.total;
@@ -185,6 +166,7 @@ async function sync({ currentId = null, full = false, trigger = "manual", expect
         } else {
           if (!pending) {
             await phase(progress, "Reading conversation", item.title || item.id);
+            if (await stopped()) return;
             const readStart = performance.now();
             body = await conversation(auth.token, item.id, wait => phase(progress, "Waiting for ChatGPT retry", `${Math.ceil(wait / 1000)} seconds`));
             timings.providerMs = performance.now() - readStart;
@@ -201,6 +183,7 @@ async function sync({ currentId = null, full = false, trigger = "manual", expect
           body = pending.conversation;
           if (await stopped()) return;
           await phase(progress, "Saving conversation", body.title || item.title || item.id);
+          if (await stopped()) return;
           const uploadStart = performance.now();
           const acknowledgement = await receiver(config, "/v1/chatgpt", pending);
           timings.receiverMs = performance.now() - uploadStart;
@@ -240,7 +223,7 @@ async function sync({ currentId = null, full = false, trigger = "manual", expect
     await db.prune(Date.now() - retention);
     await status({ ...progress.run, running: false, saved: progress.run.created + progress.run.updated,
       skipped: progress.run.unchanged + progress.run.stale + progress.run.checkpointSkipped,
-      lastSync: new Date().toISOString(), retryAt: 0, nextSync: Date.now() + interval, error: null });
+      lastSync: new Date().toISOString(), unfinished: false, stopping: false, error: null });
 
   } catch (error) {
     const message = error.message || String(error);
@@ -251,30 +234,10 @@ async function sync({ currentId = null, full = false, trigger = "manual", expect
       progress.run.error = message;
       const item = progress.items?.[progress.index];
       const failedResult = item ? await result(progress, { ...item, title: progress.run.currentTitle || item.title }, "failed", message) : null;
-      await publish(progress, { running: false, error: message, retryAt: Date.now() + interval }, failedResult ? [failedResult] : []);
-    } else await status({ running: false, error: message, retryAt: Date.now() + interval });
+      await publish(progress, { running: false, error: message, stopping: false }, failedResult ? [failedResult] : []);
+    } else await status({ running: false, error: message, stopping: false });
   } finally { running = false; }
 }
-
-async function setupAlarm() {
-  await chrome.alarms.create("sync", { periodInMinutes: 15 });
-  await chrome.alarms.create("resume", { periodInMinutes: 1 });
-}
-
-async function tick() {
-  const config = await settings();
-  if (!config.token || config.paused || running) return;
-  const activeProgress = await db.get("meta", "activeProgress");
-  const currentProgress = await db.get("meta", "currentProgress");
-  const { status = {} } = await chrome.storage.local.get("status");
-  if (activeProgress || currentProgress) {
-    if (!status.retryAt || status.retryAt <= Date.now()) await sync({ trigger: "recovery" });
-  } else if (!status.nextSync || status.nextSync <= Date.now()) await sync({ trigger: "scheduled" });
-}
-
-chrome.alarms.onAlarm.addListener(async () => { await ready; await tick(); });
-chrome.runtime.onStartup?.addListener(async () => { await ready; await tick(); });
-chrome.runtime.onInstalled?.addListener(async () => { await ready; await tick(); });
 
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL(""))) return;
@@ -285,48 +248,43 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       if (!Number.isInteger(port) || port < 1 || port > 65535 || !/^[a-f0-9]{64}$/i.test(token)) throw new Error("Use a valid port and the 64-character Buddy pairing token.");
       const config = await settings();
       const activeProgress = await db.get("meta", "activeProgress");
-      const currentProgress = await db.get("meta", "currentProgress");
-      if ((running || activeProgress || currentProgress) && (config.port !== port || config.token !== token)) {
-        throw new Error("Finish or discard pending tasks before changing the connection.");
+      if ((running || activeProgress) && (config.port !== port || config.token !== token)) {
+        throw new Error("Finish or discard the unfinished task before changing the connection.");
       }
       await health({ port, token });
-      await chrome.storage.local.set({ port, token, paired: true });
-      await setupAlarm();
-      if (!config.paused) void sync({ trigger: "connection" });
+      await chrome.storage.local.set({ port, token });
     } else if (message.type === "health") {
       await health(await settings());
-    } else if (message.type === "pause") {
-      await chrome.storage.local.set({ paused: true });
+    } else if (message.type === "stop") {
+      if (!running) throw new Error("No sync is running.");
       stopRequested = true;
-      if (!running) await status({ running: false });
-    } else if (message.type === "resume") {
-      await chrome.storage.local.set({ paused: false });
-      if (!running) void sync({ trigger: "recovery" });
+      await status({ stopping: true });
     } else if (message.type === "discard") {
-      if (running || !(await settings()).paused) throw new Error("Pause and wait for the current save to finish before discarding a task.");
-      for (const pointer of ["activeProgress", "currentProgress"]) {
-        const key = await db.get("meta", pointer);
-        const progress = key && await db.get("progress", key);
-        if (progress?.run) {
-          progress.run.state = "discarded";
-          progress.run.endedAt = Date.now();
-          progress.run.stage = "Task discarded; saved files retained";
-          await publish(progress, { running: false, retryAt: 0, error: null });
-        }
-        if (key) await db.commit([db.del("progress", key), db.del("meta", pointer), db.del("pending", key)]);
+      if (running) throw new Error("Stop the sync and wait for the current operation to finish before discarding it.");
+      const key = await db.get("meta", "activeProgress");
+      const progress = key && await db.get("progress", key);
+      if (progress) {
+        progress.run.state = "discarded";
+        progress.run.error = null;
+        progress.run.endedAt = Date.now();
+        progress.run.stage = "Task discarded; saved files retained";
+        await db.commit([db.put("runs", progress.run.id, progress.run), db.del("progress", key), db.del("pending", key), db.del("meta", "activeProgress")]);
+        await status({ ...progress.run, running: false, unfinished: false, stopping: false, error: null });
+      } else if (key) {
+        await db.commit([db.del("pending", key), db.del("meta", "activeProgress")]);
+        await status({ state: "discarded", running: false, unfinished: false, stopping: false, error: null });
       }
-      await db.commit([db.del("pending", "legacy")]);
-    } else if (message.type === "sync") {
+    } else if (message.type === "sync" || message.type === "continue") {
       if (running) throw new Error("A sync is already running. Check the current task for progress.");
-      if (message.currentId && !/^[a-zA-Z0-9_-]{1,128}$/.test(message.currentId)) throw new Error("Invalid conversation ID.");
-      if (message.full) {
-        const activeProgress = await db.get("meta", "activeProgress");
-        if (activeProgress) throw new Error("Finish or discard the pending history task before rechecking all history.");
+      const active = await db.get("meta", "activeProgress");
+      if (message.type === "continue") {
+        if (!active) throw new Error("No unfinished task to continue.");
+        void sync({ resume: true });
+      } else {
+        if (active) throw new Error("Continue or discard the unfinished task before starting another sync.");
+        if (message.currentId && !/^[a-zA-Z0-9_-]{1,128}$/.test(message.currentId)) throw new Error("Invalid conversation ID.");
+        void sync({ currentId: message.currentId || null, full: message.full === true, expectedAccount: message.account || null });
       }
-      const config = await settings();
-      if (config.paused && !message.currentId) throw new Error("Resume automatic archiving before syncing history.");
-      if (!running) void sync({ currentId: message.currentId || null, full: message.full === true,
-        expectedAccount: message.account || null, trigger: "manual" });
     } else if (message.type === "tasks") {
       return { ok: true, data: await db.page("runs", { offset: Math.max(0, Number(message.offset) || 0), limit: 25 }) };
     } else if (message.type === "taskResults") {
@@ -345,16 +303,19 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 });
 
 const ready = (async () => {
-  const { status: previous = {}, migrationVersion, token } = await chrome.storage.local.get(["status", "autoSync", "migrationVersion", "token"]);
-  if (!migrationVersion) {
-    await chrome.storage.local.set({ migrationVersion: 1, historyStartedAt: Date.now(),
-      migrationNotice: Boolean(token), paused: false });
-    await chrome.storage.local.remove("autoSync");
+  const { status: previous = {}, historyStartedAt } = await chrome.storage.local.get(["status", "historyStartedAt"]);
+  await db.openStore();
+  const key = await db.get("meta", "activeProgress");
+  const progress = key && await db.get("progress", key);
+  const run = progress?.run || (previous.id ? await db.get("runs", previous.id) : null);
+  if (progress && run.state === "running") {
+    run.state = "interrupted";
+    run.stage = "Interrupted; click Continue sync";
+    await db.commit([db.put("progress", key, progress), db.put("runs", run.id, run)]);
   }
-  await status({ running: false, state: previous.running ? "interrupted" : previous.state });
-  await db.migrate();
+  await chrome.storage.local.set({
+    historyStartedAt: historyStartedAt || Date.now(),
+    status: { ...run, running: false, stopping: false, unfinished: Boolean(key), lastSync: previous.lastSync, changedAt: Date.now() },
+  });
   await db.prune(Date.now() - retention);
-  await setupAlarm();
 })();
-// Startup checks also cover an existing installation whose periodic alarm was absent.
-ready.then(() => tick());
