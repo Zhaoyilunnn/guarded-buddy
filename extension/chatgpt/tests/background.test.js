@@ -14,6 +14,7 @@ test("only manual actions start or continue sync; failures, stops, and restarts 
   assert.equal(manifest.permissions.includes("alarms"), false);
   const data = { port: 18242 };
   let listener;
+  const disk = new Map();
   let details = 0;
   let writes = 0;
   let providerCalls = 0;
@@ -33,6 +34,12 @@ test("only manual actions start or continue sync; failures, stops, and restarts 
   };
   globalThis.fetch = async (url, options = {}) => {
     const reply = value => ({ ok: true, status: 200, json: async () => value });
+    if (url.endsWith("/v1/sync/prepare")) return reply({ ready: true });
+    if (url.endsWith("/v1/sync/check")) {
+      const query = JSON.parse(options.body);
+      return reply({ items: query.items.map(item => ({ id: item.id,
+        status: disk.get(`${storageId}:${query.account}:${item.id}`) === item.revision ? "unchanged" : "needed" })) });
+    }
     if (url.endsWith("/health")) return reply({ app: "buddy", schema_version: 1, storage_id: storageId });
     if (url.includes("chatgpt.com")) providerCalls++;
     if (url.endsWith("/api/auth/session")) return reply({ accessToken: "provider-secret", user: { id: accountId } });
@@ -48,6 +55,8 @@ test("only manual actions start or continue sync; failures, stops, and restarts 
       assert.equal(options.body.includes("provider-secret"), false);
       if (hold) await hold;
       if (failIngest) throw new TypeError("Failed to fetch");
+      const snapshot = JSON.parse(options.body);
+      disk.set(`${storageId}:${snapshot.account}:${snapshot.conversation.conversation_id}`, snapshot.conversation.update_time);
       writes++;
       return reply({ status: "updated" });
     }
@@ -80,7 +89,12 @@ test("only manual actions start or continue sync; failures, stops, and restarts 
   await run({ type: "sync" });
   assert.equal(writes, 2);
   assert.equal(details, 2);
-  assert.equal(data.status.checkpointSkipped, 1);
+  assert.equal(data.status.diskSkipped, 1);
+  await run({ type: "sync" });
+  assert.equal(details, 2, "disk versions skip all existing conversations");
+  disk.clear();
+  await run({ type: "sync" });
+  assert.equal(details, 4, "deleted disk archives are fetched despite prior successful syncs");
   const beforeIdle = providerCalls;
   await import("../background.js?idle-restart");
   await message({ type: "health" });

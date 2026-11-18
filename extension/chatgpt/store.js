@@ -1,9 +1,9 @@
 // Durable queue and task data are separate records; UI state never carries payloads.
 let database;
-const tables = ["meta", "progress", "pending", "checkpoints", "runs", "results"];
+const tables = ["meta", "progress", "pending", "runs", "results"];
 export function openStore() {
   database ||= new Promise((resolve, reject) => {
-    const request = indexedDB.open("buddy-chatgpt", 1);
+    const request = indexedDB.open("buddy-chatgpt-disk-sync", 1);
     request.onupgradeneeded = () => {
       for (const name of tables) {
         const store = request.result.createObjectStore(name);

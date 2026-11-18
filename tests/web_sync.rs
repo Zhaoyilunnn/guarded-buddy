@@ -552,6 +552,119 @@ fn receiver_and_cli_collect_enforce_auth_and_render_current_branch() {
         post().send().unwrap().json::<serde_json::Value>().unwrap()["status"],
         "skipped"
     );
+    for endpoint in ["/v1/sync/prepare", "/v1/sync/check"] {
+        assert_eq!(
+            client
+                .post(format!("{base}{endpoint}"))
+                .json(&json!({}))
+                .send()
+                .unwrap()
+                .status(),
+            401
+        );
+    }
+    let prepare = || {
+        client
+            .post(format!("{base}/v1/sync/prepare"))
+            .bearer_auth(&token)
+            .json(&json!({}))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+    };
+    prepare();
+    let versions = |account: &str, items: serde_json::Value| {
+        client
+            .post(format!("{base}/v1/sync/check"))
+            .bearer_auth(&token)
+            .json(&json!({"account": account, "items": items}))
+            .send()
+            .unwrap()
+    };
+    let check = |revision: f64| {
+        versions(
+            &payload.account,
+            json!([{"id": payload.id(), "revision": revision}]),
+        )
+        .error_for_status()
+        .unwrap()
+        .json::<serde_json::Value>()
+        .unwrap()["items"][0]["status"]
+            .clone()
+    };
+    assert_eq!(check(100.0), "unchanged");
+    assert_eq!(check(200.0), "needed");
+    assert_eq!(check(50.0), "stale");
+    assert_eq!(check(0.0), "needed");
+    assert_eq!(
+        versions(
+            &"c".repeat(64),
+            json!([{"id": payload.id(), "revision": 100}])
+        )
+        .json::<serde_json::Value>()
+        .unwrap()["items"][0]["status"],
+        "needed"
+    );
+    assert_eq!(
+        versions(
+            &payload.account,
+            json!([{"id": "missing", "revision": 100}])
+        )
+        .json::<serde_json::Value>()
+        .unwrap()["items"][0]["status"],
+        "needed"
+    );
+    assert_eq!(versions("../escape", json!([])).status(), 400);
+    assert_eq!(
+        versions(
+            &payload.account,
+            json!([{"id": "../escape", "revision": 100}])
+        )
+        .status(),
+        400
+    );
+    assert_eq!(
+        versions(
+            &payload.account,
+            json!(vec![json!({"id": "one", "revision": 100}); 101])
+        )
+        .status(),
+        400
+    );
+    let disk_path = archive
+        .path()
+        .join("chatgpt")
+        .join(&payload.account)
+        .join("1970/01/01/conversation-1.json");
+    let disk_bytes = std::fs::read(&disk_path).unwrap();
+    std::fs::remove_file(&disk_path).unwrap();
+    assert_eq!(
+        check(100.0),
+        "needed",
+        "deleted files cannot be skipped even before reconciliation"
+    );
+    prepare();
+    assert_eq!(check(100.0), "needed");
+    std::fs::write(&disk_path, &disk_bytes).unwrap();
+    prepare();
+    assert_eq!(
+        check(100.0),
+        "unchanged",
+        "restored archives are recognized without browser state"
+    );
+    let mut external = payload.clone();
+    external.conversation["update_time"] = json!(300);
+    std::fs::write(&disk_path, serde_json::to_vec(&external).unwrap()).unwrap();
+    assert_eq!(
+        check(100.0),
+        "needed",
+        "changed files invalidate cached versions"
+    );
+    prepare();
+    assert_eq!(check(300.0), "unchanged");
+    std::fs::write(&disk_path, disk_bytes).unwrap();
+    prepare();
     let info = client
         .get(format!("{base}/health"))
         .bearer_auth(&token)

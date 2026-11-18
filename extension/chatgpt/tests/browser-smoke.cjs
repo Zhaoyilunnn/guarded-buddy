@@ -40,6 +40,8 @@ const root = path.resolve(__dirname, '..');
       const reply = value => ({ ok: true, status: 200, json: async () => value });
       window.fetch = async (url, options) => {
         if (url.includes('chatgpt.com')) window.__metrics.providerCalls++;
+        if (url.endsWith('/v1/sync/prepare')) return reply({ ready: true });
+        if (url.endsWith('/v1/sync/check')) return reply({ items: JSON.parse(options.body).items.map(item => ({ id: item.id, status: 'needed' })) });
         if (url.endsWith('/health')) return reply({ app: 'buddy', schema_version: 1, storage_id: 'native', storage_path: '/archive/chatgpt' });
         if (url.endsWith('/api/auth/session')) return reply({ accessToken: 'synthetic', user: { id: 'synthetic-user' } });
         if (url.includes('/conversations?')) return reply({ total: 2, items: ['one', 'two'].map(id => ({ id, update_time: 100 })) });

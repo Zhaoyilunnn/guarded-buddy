@@ -168,11 +168,11 @@ WSL automatically when Windows starts.
 
 After updating the repository, run `cargo install --path .`, restart the running
 `buddy web serve` process (or its systemd service), and reload the unpacked
-extension in `chrome://extensions`. Version 0.4.0 is manual-only and does not
-import old `chrome.storage.local` queues, checkpoints, or task histories. There
-are no legacy settings or queue migration paths. Current IndexedDB records use
-their existing schema directly. Disk JSON and Markdown archives remain available
-through the receiver, independently of browser state.
+extension in `chrome://extensions`. Version 0.5.0 requires the matching receiver
+with disk version checks. It uses a fresh `buddy-chatgpt-disk-sync` IndexedDB
+database; earlier queues, task histories, and browser checkpoints are not imported.
+Disk JSON and Markdown archives remain available and determine incremental sync
+without any browser acknowledgement history.
 
 ## Storage and report behavior
 
@@ -290,7 +290,7 @@ work because no automatic work is scheduled.
   ChatGPT account to be signed in. **Refresh** reads the latest disk state.
 - **Sync tasks** shows trigger, scope, original account/destination, timestamps,
   counts, and per-conversation results. Task IDs and counters survive manual continuation.
-  Unchanged counts include identical content, recently verified checkpoints, and
+  Unchanged counts include identical content, matching disk versions, and
   ignored older revisions; task details distinguish these outcomes. A failed
   item is replaced by its eventual result when retried. Task details contain
   metadata, not conversation bodies or credentials, and remain in extension-local
@@ -326,39 +326,44 @@ settings cannot change while unfinished work exists.
 
 ## Incremental sync and recovery
 
-- **Sync now** compares list update timestamps with locally acknowledged
-  revisions and reads details for changed or unrecognized conversations. Matching
-  unchanged conversations are skipped during incremental manual checks. To catch
-  content changes absent from list timestamps, each history task verifies at most
-  five unchanged conversations last verified at least 24 hours ago. A persistent
-  list-position cursor rotates this budget, wrapping at the end so earlier entries
-  cannot permanently consume it. Thus verification latency grows with archive
-  size; use a current-conversation save or full recheck for immediate verification.
-  Provider requests bypass the browser HTTP cache. The popup distinguishes list entries
-  checked from conversation details actually read, and exposes provider backoff.
-- **Recheck all history** fetches every listed conversation regardless of the
-  checkpoint. Use it after restoring/deleting the local archive or if a provider
-  update timestamp failed to reflect a change. Saving the current conversation
-  also bypasses the checkpoint.
+- Before each sync or **Continue sync**, the receiver completes a disk catalog
+  reconciliation through `POST /v1/sync/prepare`. Existing file metadata avoids
+  reparsing unchanged JSON. Missing, modified, restored, and externally added
+  archives are reflected before version checks begin.
+- **Sync now** reads conversation list pages and sends each remaining page's IDs
+  and update timestamps to `POST /v1/sync/check`. The receiver looks up the latest
+  disk revision by account and conversation ID. Missing or older disk snapshots,
+  and unknown provider timestamps, require detail reads. Matching revisions and
+  newer disk revisions skip detail reads and uploads. Each candidate file's size,
+  modification time, and file type are checked before a skip; files changed or
+  deleted since reconciliation cannot justify skipping. Successful uploads update
+  the disk catalog immediately. No browser checkpoint or periodic sample download
+  participates in this decision. Pairing token and port changes do not invalidate
+  disk history. A fresh browser can skip existing archives immediately.
+- List pagination still reaches the end: an unchanged item does not prove that
+  later items are present on disk. The popup distinguishes entries checked from
+  conversation details actually read, and exposes provider backoff. Provider
+  requests bypass the browser HTTP cache.
+- **Recheck all history** fetches every listed conversation regardless of disk
+  revision. Use it if a provider update timestamp failed to reflect a change.
+  Saving the current conversation also bypasses the version comparison.
 - A complete snapshot is written once to an independent IndexedDB pending record
   before delivery. Stage updates never include the payload or earlier item
   results. The receiver acknowledges durable JSON persistence. One IndexedDB
-  transaction then advances the cursor, updates the checkpoint, writes the single
-  item result, and deletes the pending snapshot. A failed transaction retains the
-  old cursor and queued body for idempotent replay. Settings and a small UI status
-  remain in `chrome.storage.local`; task summaries, results, progress, queues, and
-  per-conversation checkpoints are separate database records. Timing updates
-  modify only the current result. Unchanged content is skipped and older provider
-  revisions are ignored.
-- Pagination position and per-conversation acknowledgements are scoped to the
-  receiver's storage identity and survive extension worker suspension. Changing
-  the storage directory starts fresh checkpoints, so a previous destination's
-  acknowledgements cannot skip delivery to the new destination. Interrupted items may be replayed safely only after
-  **Continue sync** is selected.
+  transaction then advances the cursor, writes the single item result, and deletes
+  the pending snapshot. A failed transaction retains the old cursor and queued
+  body for idempotent replay. Settings and a small UI status remain in
+  `chrome.storage.local`; task summaries, results, progress, and queues are
+  separate database records. Unchanged content is skipped and older provider
+  revisions are ignored at persistence time as well.
+- Task progress is scoped to the receiver's storage identity and survives extension
+  worker suspension. An unfinished task refuses delivery to another destination
+  or account. **Continue sync** reconciles disk state again and rechecks the
+  remaining page; previously queued snapshots are safely replayed.
 - Provider 429/5xx responses use bounded retries with backoff. Failed tasks retain
   their progress and wait for **Continue sync**; the popup displays the failure.
   Bounded HTTP retries with backoff occur only inside an explicitly started task.
-  A failed conversation stops that run at its checkpoint. Login failures require
+  A failed conversation stops that run at its saved cursor. Login failures require
   signing in again. A queued snapshot for another account requires returning to
   that account before recovery can finish.
 - Closing the popup does not cancel a manually started task. If its worker is
@@ -398,6 +403,8 @@ The local protocol exposes these authenticated endpoints:
 | --- | --- |
 | `GET /health` | Returns `app: "buddy"`, `schema_version: 1`, and `storage_id` (a digest identifying the storage directory), `storage_path`, `shared_directory`, and `catalog_version: 1` |
 | `POST /v1/chatgpt` | Accepts `schema_version`, `account`, `captured_at`, and `conversation`; returns `status` (`created`, `updated`, `skipped`, or `stale`) and `save_ms` |
+| `POST /v1/sync/prepare` | Completes disk catalog reconciliation; returns `ready: true`; the extension allows up to 120 seconds for large catalogs |
+| `POST /v1/sync/check` | Accepts `account` and up to 100 `items` with `id` and numeric `revision` (0 means unknown); returns each ID with `needed`, `unchanged`, or `stale` based on current disk files |
 | `GET /v1/archives` | Returns cached disk metadata; accepts `q` (case-insensitive title search), `account`, `offset`, and `limit` (default 50, maximum 100); `refresh=true` queues a disk reconciliation; returns `items`, filtered `total`, account namespaces, `warnings`, `refreshing`, and `checked_at` |
 | `POST /v1/archives/retry` | Accepts `account` and `id` for an existing archive; queues Markdown conversion without accepting a caller-supplied filesystem path |
 
@@ -415,7 +422,11 @@ sequenceDiagram
     Note over Extension: Pairing and startup never start sync
     User->>Extension: Save current / Sync now / Recheck all / Continue sync
     Extension->>Receiver: Authenticated health check
-    Extension->>ChatGPT: Use browser login to list and fetch conversations
+    Extension->>Receiver: POST /v1/sync/prepare; reconcile disk catalog
+    Extension->>ChatGPT: Use browser login to list conversations by page
+    Extension->>Receiver: POST /v1/sync/check with page IDs and revisions
+    Receiver-->>Extension: Needed / unchanged / stale for each disk version
+    Extension->>ChatGPT: Fetch details only for needed conversations (or force recheck)
     Extension->>Extension: Insert independent pending snapshot once in IndexedDB
     Extension->>Receiver: POST /v1/chatgpt with receiver token
     alt sync.path configured
@@ -424,7 +435,7 @@ sequenceDiagram
         Receiver->>Local: Compare revision and atomically replace conversation JSON
     end
     Receiver-->>Extension: Acknowledge saved / skipped / stale
-    Extension->>Extension: Transactionally commit one result, checkpoint and cursor; delete pending snapshot
+    Extension->>Extension: Transactionally commit one result and cursor; delete pending snapshot
     User->>Extension: View archive and sync tasks
     Extension->>Receiver: Authenticated archive metadata query
     Receiver-->>Extension: Actual file paths and Markdown state
@@ -480,6 +491,7 @@ or network latency. For two forced full checks of eight synthetic 512 KiB
 snapshots, version 0.2.0 wrote approximately 16.3 MiB; the current version writes about
 8.22 MiB, with one queue insertion per fetched snapshot and small phase records.
 A subsequent manual incremental check makes no detail requests for unchanged items.
-Tests also verify bounded old-detail rotation, acknowledgement rollback, expired
+Tests also verify fresh-browser disk checks, missing/older archive downloads,
+acknowledgement rollback, expired
 result pruning, and manual-only continuation. These figures are a local regression
 budget, not a claim of a fixed end-to-end speedup on a real account.

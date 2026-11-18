@@ -654,6 +654,72 @@ async fn ingest(
     Ok(Json(json!({"status": status, "save_ms": save_ms})))
 }
 
+// Refresh from disk before each explicit sync or continuation, never from browser acknowledgements.
+async fn prepare_sync(
+    State(receiver): State<Receiver>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    if !authorized(&headers, &receiver) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "invalid token, host or origin".into(),
+        ));
+    }
+    tokio::task::spawn_blocking(move || {
+        receiver.reconcile_catalog()?;
+        Ok::<_, anyhow::Error>(Json(json!({"ready": true})))
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+#[derive(Deserialize)]
+struct VersionItem {
+    id: String,
+    revision: f64,
+}
+
+#[derive(Deserialize)]
+struct VersionQuery {
+    account: String,
+    items: Vec<VersionItem>,
+}
+
+async fn check_versions(
+    State(receiver): State<Receiver>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    if !authorized(&headers, &receiver) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "invalid token, host or origin".into(),
+        ));
+    }
+    let query: VersionQuery = serde_json::from_slice(&body)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid version query".into()))?;
+    if query.account.len() != 64
+        || !query.account.bytes().all(|b| b.is_ascii_hexdigit())
+        || query.items.len() > 100
+        || query.items.iter().any(|item| {
+            item.id.is_empty()
+                || item.id.len() > 128
+                || !item
+                    .id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+    {
+        return Err((StatusCode::BAD_REQUEST, "invalid version query".into()));
+    }
+    tokio::task::spawn_blocking(move || receiver.disk_versions(&query))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 async fn health(
     State(receiver): State<Receiver>,
     headers: HeaderMap,
@@ -813,6 +879,7 @@ impl Drop for CatalogWorker {
 #[derive(Default)]
 struct ArchiveCache {
     entries: std::collections::HashMap<PathBuf, (std::time::SystemTime, u64, Value)>,
+    by_identity: std::collections::HashMap<(String, String), Vec<PathBuf>>,
     warnings: Vec<String>,
     refreshing: bool,
     checked_at: Option<String>,
@@ -918,6 +985,14 @@ impl Receiver {
             }
         }
         live.entries = cache.entries;
+        live.by_identity = std::collections::HashMap::new();
+        let identities: Vec<_> = live.entries.iter().filter_map(|(path, (_, _, row))| {
+            let identity = (row["account"].as_str()?.to_owned(), row["id"].as_str()?.to_owned());
+            Some((identity, path.clone()))
+        }).collect();
+        for (identity, path) in identities {
+            live.by_identity.entry(identity).or_default().push(path);
+        }
         live.warnings = warnings;
         live.refreshing = false;
         live.checked_at = Some(chrono::Utc::now().to_rfc3339());
@@ -986,10 +1061,52 @@ impl Receiver {
         cache
             .entries
             .retain(|_, (_, _, r)| r["account"] != stored.account || r["id"] != stored.id());
+        cache.by_identity.insert(
+            (stored.account.clone(), stored.id().to_owned()), vec![path.clone()],
+        );
         cache
             .entries
             .insert(path, (meta.modified()?, meta.len(), row));
         Ok(())
+    }
+
+    fn disk_versions(&self, query: &VersionQuery) -> anyhow::Result<Value> {
+        let cache = self
+            .catalog
+            .lock()
+            .map_err(|_| anyhow::anyhow!("catalog lock failed"))?;
+        let items: Vec<_> = query
+            .items
+            .iter()
+            .map(|item| {
+                let local = cache
+                    .by_identity
+                    .get(&(query.account.clone(), item.id.clone()))
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|path| {
+                        let (modified, size, row) = cache.entries.get(path)?;
+                        // A missing or externally changed file cannot justify skipping a download.
+                        let meta = std::fs::symlink_metadata(path).ok()?;
+                        if !meta.is_file()
+                            || meta.file_type().is_symlink()
+                            || meta.len() != *size
+                            || meta.modified().ok().as_ref() != Some(modified)
+                        {
+                            return None;
+                        }
+                        row["updated_at"].as_f64()
+                    })
+                    .reduce(f64::max);
+                let status = match local {
+                    Some(local) if item.revision > 0.0 && local == item.revision => "unchanged",
+                    Some(local) if item.revision > 0.0 && local > item.revision => "stale",
+                    _ => "needed",
+                };
+                json!({"id": item.id, "status": status})
+            })
+            .collect();
+        Ok(json!({"items": items}))
     }
 
     fn archive_rows(&self) -> anyhow::Result<(Vec<Value>, Vec<String>)> {
@@ -1244,6 +1361,8 @@ pub fn run(
             tokio::runtime::Runtime::new()?.block_on(async {
                 let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
                 let router = Router::new().route("/health", get(health)).route("/v1/chatgpt", post(ingest))
+                    .route("/v1/sync/prepare", post(prepare_sync))
+                    .route("/v1/sync/check", post(check_versions))
                     .route("/v1/archives", get(archives))
                     .route("/v1/archives/retry", post(retry_markdown))
                     .layer(DefaultBodyLimit::max(max_body)).with_state(receiver);

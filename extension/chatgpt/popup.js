@@ -22,7 +22,7 @@ function render() {
   $("currentTitle").textContent = task.running ? task.currentTitle || "" : "";
   $("newCount").textContent = task.created || 0;
   $("updatedCount").textContent = task.updated || 0;
-  $("unchangedCount").textContent = (task.unchanged || 0) + (task.stale || 0) + (task.checkpointSkipped || 0);
+  $("unchangedCount").textContent = (task.unchanged || 0) + (task.stale || 0) + (task.diskSkipped || 0);
   $("taskError").textContent = task.error || "";
   $("activity").textContent = task.running ? `Last progress: ${date(task.changedAt)}`
     : task.lastSync ? `Last successful sync: ${date(task.lastSync)}` : "No successful sync recorded yet.";

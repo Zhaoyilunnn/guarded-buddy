@@ -19,7 +19,7 @@ async function receiver(config, path, payload) {
       method: payload ? "POST" : "GET",
       headers: { Authorization: `Bearer ${config.token}`, ...(payload ? { "Content-Type": "application/json" } : {}) },
       ...(payload ? { body } : {}),
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(path === "/v1/sync/prepare" ? 120000 : 15000),
     });
   } catch (error) {
     throw new Error(`Buddy ${payload ? `upload (${size})` : "health check"} failed: ${error.message || String(error)}. Check buddy web serve${payload ? " and its web.max_body_mib setting" : ""}.`);
@@ -57,7 +57,7 @@ async function health(config) {
 async function publish(progress, extra = {}, commands = []) {
   await db.commit([db.put("progress", progress.key, progress), db.put("runs", progress.run.id, progress.run), ...commands]);
   await status({ ...progress.run, saved: progress.run.created + progress.run.updated,
-    skipped: progress.run.unchanged + progress.run.stale + progress.run.checkpointSkipped, ...extra, unfinished: true });
+    skipped: progress.run.unchanged + progress.run.stale + progress.run.diskSkipped, ...extra, unfinished: true });
 }
 
 async function phase(progress, stage, title = null) {
@@ -96,7 +96,7 @@ async function sync({ currentId = null, full = false, resume = false, expectedAc
         run: { id, trigger: "manual", scope: currentId ? "conversation" : full ? "full" : "incremental",
           startedAt: Date.now(), endedAt: null, total: null, error: null, currentTitle: null, state: "running", stage: "Connecting to Buddy",
           checked: 0, account: null, storageId: null,
-          created: 0, updated: 0, unchanged: 0, stale: 0, checkpointSkipped: 0, failed: 0, detailsRead: 0, verificationUsed: 0 } };
+          created: 0, updated: 0, unchanged: 0, stale: 0, diskSkipped: 0, failed: 0, detailsRead: 0 } };
       await publish(progress, { running: true, stopping: false }, [db.put("meta", pointer, progress.key)]);
     }
     async function stopped() {
@@ -125,12 +125,8 @@ async function sync({ currentId = null, full = false, resume = false, expectedAc
       throw new Error("This task belongs to another ChatGPT account. Sign in to that account before continuing.");
     }
     progress.run.account = auth.account;
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(config.token));
-    const receiverId = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
-    const checkpointKey = `checkpoints:${auth.account}:${config.port}:${receiverId}:${storageId}`;
-    progress.run.checkpointScope = checkpointKey;
-    const verificationKey = `verification:${checkpointKey}`;
-    progress.run.verificationStart ??= await db.get("meta", verificationKey) || 0;
+    await phase(progress, "Checking disk archives");
+    await receiver(config, "/v1/sync/prepare", {});
     if (await stopped()) return;
     while (true) {
       if (!progress.items) {
@@ -141,28 +137,35 @@ async function sync({ currentId = null, full = false, resume = false, expectedAc
           const page = await listPage(auth.token, progress.offset, wait => phase(progress, "Waiting for ChatGPT list retry", `${Math.ceil(wait / 1000)} seconds`));
           progress.items = page.items;
           progress.run.total = page.total;
-          if (Number.isFinite(page.total) && progress.run.verificationStart >= page.total) progress.run.verificationStart = 0;
         }
         await publish(progress, { running: true });
+      }
+      // Recheck remaining items on every continuation; browser state never proves persistence.
+      let disk = new Map();
+      if (!progress.full && !progress.currentId) {
+        await phase(progress, "Comparing disk versions");
+        const check = await receiver(config, "/v1/sync/check", {
+          account: auth.account,
+          items: progress.items.slice(progress.index).map(item => ({ id: item.id, revision: revision(item.update_time) })),
+        });
+        if (!Array.isArray(check.items)) throw new Error("Invalid Buddy disk version response.");
+        disk = new Map(check.items.map(item => [item.id, item.status]));
+        for (const item of progress.items.slice(progress.index)) {
+          if (!["needed", "unchanged", "stale"].includes(disk.get(item.id))) throw new Error("Incomplete Buddy disk version response.");
+        }
       }
       for (; progress.index < progress.items.length;) {
         if (await stopped()) return;
         const item = progress.items[progress.index];
         progress.run.currentId = item.id;
         await phase(progress, "Checking conversation", item.title || item.id);
-        const updated = revision(item.update_time);
-        const checkpoint = await db.get("checkpoints", [checkpointKey, item.id]);
-        const age = Date.now() - checkpoint?.checkedAt;
         let outcome;
         let body;
-        let checkpointCommand;
         const timings = {};
         let pending = await db.get("pending", progress.key);
-        const verify = !pending && !progress.full && !progress.currentId && checkpoint?.revision === updated
-          && progress.offset + progress.index >= progress.run.verificationStart && age >= 24 * 3600000 && (progress.run.verificationUsed || 0) < 5;
-        if (!pending && !progress.full && !progress.currentId && updated > 0
-            && checkpoint?.revision === updated && age >= 0 && !verify) {
-          outcome = "checkpointSkipped";
+        const diskStatus = disk.get(item.id);
+        if (!pending && (diskStatus === "unchanged" || diskStatus === "stale")) {
+          outcome = diskStatus === "stale" ? "stale" : "diskSkipped";
         } else {
           if (!pending) {
             await phase(progress, "Reading conversation", item.title || item.id);
@@ -171,8 +174,6 @@ async function sync({ currentId = null, full = false, resume = false, expectedAc
             body = await conversation(auth.token, item.id, wait => phase(progress, "Waiting for ChatGPT retry", `${Math.ceil(wait / 1000)} seconds`));
             timings.providerMs = performance.now() - readStart;
             progress.run.detailsRead = (progress.run.detailsRead || 0) + 1;
-            if (verify) progress.run.verificationUsed = (progress.run.verificationUsed || 0) + 1;
-            progress.pendingVerificationPosition = verify ? progress.offset + progress.index : null;
             pending = { schema_version: 1, account: auth.account,
               captured_at: new Date().toISOString(), conversation: body };
             const queueStart = performance.now();
@@ -192,18 +193,14 @@ async function sync({ currentId = null, full = false, resume = false, expectedAc
             throw new Error("Buddy did not confirm a recognized persistence result. Upgrade the receiver and retry.");
           }
           outcome = acknowledgement.status === "skipped" ? "unchanged" : acknowledgement.status;
-          checkpointCommand = db.put("checkpoints", [checkpointKey, item.id], { revision: revision(body.update_time), checkedAt: Date.now() });
         }
         progress.run[outcome]++;
         progress.run.checked++;
         const resultCommand = await result(progress, { ...item, title: body?.title || item.title }, outcome, null, timings);
-        const verificationCommand = progress.pendingVerificationPosition != null
-          ? db.put("meta", verificationKey, progress.pendingVerificationPosition + 1) : null;
-        progress.pendingVerificationPosition = null;
         progress.index++;
         // Persist the acknowledgement and cursor together before doing more work.
         const commitStart = performance.now();
-        await publish(progress, { running: true }, [resultCommand, db.del("pending", progress.key), ...(checkpointCommand ? [checkpointCommand] : []), ...(verificationCommand ? [verificationCommand] : [])]);
+        await publish(progress, { running: true }, [resultCommand, db.del("pending", progress.key)]);
         timings.commitMs = performance.now() - commitStart;
         await db.commit([resultCommand]);
         await status({ commitMs: timings.commitMs });
@@ -218,11 +215,10 @@ async function sync({ currentId = null, full = false, resume = false, expectedAc
     progress.run.stage = "Sync complete";
     progress.run.endedAt = Date.now();
     progress.run.currentTitle = null;
-    await db.commit([db.put("runs", progress.run.id, progress.run), db.del("progress", progress.key), db.del("meta", pointer),
-      ...(!progress.full && !progress.currentId && (progress.run.verificationUsed || 0) < 5 ? [db.put("meta", verificationKey, 0)] : [])]);
+    await db.commit([db.put("runs", progress.run.id, progress.run), db.del("progress", progress.key), db.del("meta", pointer)]);
     await db.prune(Date.now() - retention);
     await status({ ...progress.run, running: false, saved: progress.run.created + progress.run.updated,
-      skipped: progress.run.unchanged + progress.run.stale + progress.run.checkpointSkipped,
+      skipped: progress.run.unchanged + progress.run.stale + progress.run.diskSkipped,
       lastSync: new Date().toISOString(), unfinished: false, stopping: false, error: null });
 
   } catch (error) {

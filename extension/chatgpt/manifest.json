@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Buddy ChatGPT Sync",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Archive ChatGPT conversations to your local buddy receiver.",
   "permissions": [
     "storage",

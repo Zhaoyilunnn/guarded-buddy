@@ -10,17 +10,14 @@ test("queue acknowledgement is atomic and task results are paged and pruned", as
     db.put("pending", "progress:task", { account: "a".repeat(64), conversation: { conversation_id: "two" } }),
   ]);
   const commands = [db.put("progress", "progress:task", { index: 2 }),
-    db.put("checkpoints", ["scope", "two"], { revision: 2 }),
     db.put("results", ["task", "two"], { taskId: "task", id: "two", at: 2 }),
     db.del("pending", "progress:task")];
   await assert.rejects(db.commit([...commands, db.put("meta", undefined, "invalid key")]));
   assert.ok(await db.get("pending", "progress:task"), "an aborted acknowledgement retains the payload");
   assert.equal((await db.get("progress", "progress:task")).index, 1);
-  assert.equal(await db.get("checkpoints", ["scope", "two"]), undefined);
   await db.commit(commands);
   assert.equal(await db.get("pending", "progress:task"), undefined);
   assert.equal((await db.get("progress", "progress:task")).index, 2);
-  assert.equal((await db.get("checkpoints", ["scope", "two"])).revision, 2);
 
   await db.commit(Array.from({ length: 70 }, (_, i) => db.put("results", ["paged", String(i)], { taskId: "paged", id: String(i), at: i })));
   const first = await db.page("results", { taskId: "paged", limit: 25 });

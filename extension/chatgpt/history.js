@@ -93,7 +93,7 @@ async function runs() {
     detail(list, "Details read", String(run.detailsRead || 0));
     detail(list, "Failed", String(run.failed || 0));
     detail(list, "Identical content", String(run.unchanged || 0));
-    detail(list, "Recently verified", String(run.checkpointSkipped || 0));
+    detail(list, "Already on disk", String(run.diskSkipped || 0));
     detail(list, "Older ignored", String(run.stale || 0));
     if (run.error) detail(list, "Error", run.error, "error");
     const rows = element("div", null, "task-results");

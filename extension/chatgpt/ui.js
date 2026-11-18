@@ -1,6 +1,6 @@
 export const $ = id => document.getElementById(id);
 export const date = value => value ? new Date(value).toLocaleString() : "Never";
-export const labels = { created: "New", updated: "Updated", unchanged: "Identical content", stale: "Older revision ignored", checkpointSkipped: "Recently verified", failed: "Failed", completed: "Completed", stopped: "Stopped", running: "Running", interrupted: "Interrupted", discarded: "Discarded", ready: "Ready", queued: "Queued", generating: "Generating" };
+export const labels = { created: "New", updated: "Updated", unchanged: "Identical content", stale: "Older revision ignored", diskSkipped: "Already on disk", failed: "Failed", completed: "Completed", stopped: "Stopped", running: "Running", interrupted: "Interrupted", discarded: "Discarded", ready: "Ready", queued: "Queued", generating: "Generating" };
 export async function send(message) {
   const response = await chrome.runtime.sendMessage(message);
   if (!response?.ok) throw new Error(response?.error || "Extension unavailable");
@@ -26,5 +26,5 @@ export function bind(id, action) {
   });
 }
 export function counts(run = {}) {
-  return `${run.created || 0} new · ${run.updated || 0} updated · ${(run.unchanged || 0) + (run.stale || 0) + (run.checkpointSkipped || 0)} unchanged${run.failed ? ` · ${run.failed} failed` : ""}`;
+  return `${run.created || 0} new · ${run.updated || 0} updated · ${(run.unchanged || 0) + (run.stale || 0) + (run.diskSkipped || 0)} unchanged${run.failed ? ` · ${run.failed} failed` : ""}`;
 }

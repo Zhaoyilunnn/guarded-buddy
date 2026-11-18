@@ -3,10 +3,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as db from "../store.js";
 
-test("snapshots are queued once, stage writes remain small, and unchanged details use bounded verification", async () => {
+test("snapshots are queued once, stage writes remain small, and disk versions skip unchanged details independently of browser state", async () => {
   const local = { port: 18242, token: "b".repeat(64), status: {} };
   const ids = Array.from({ length: 8 }, (_, i) => `sample-${i}`);
   let listener;
+  const disk = new Map();
   let details = 0;
   let pendingWrites = 0;
   let bytes = 0;
@@ -28,12 +29,25 @@ test("snapshots are queued once, stage writes remain small, and unchanged detail
     async remove(keys) { for (const k of Array.isArray(keys) ? keys : [keys]) delete local[k]; },
   } }, runtime: { id: "bench", getURL: p => `chrome-extension://bench/${p}`, onMessage: { addListener(fn) { listener = fn; } } } };
   const reply = value => ({ ok: true, status: 200, json: async () => value });
-  globalThis.fetch = async url => {
+  globalThis.fetch = async (url, options = {}) => {
+    if (url.endsWith("/v1/sync/prepare")) return reply({ ready: true });
+    if (url.endsWith("/v1/sync/check")) {
+      const query = JSON.parse(options.body);
+      return reply({ items: query.items.map(item => ({ id: item.id,
+        status: disk.get(item.id) === item.revision ? "unchanged" : "needed" })) });
+    }
     if (url.endsWith("/health")) return reply({ app: "buddy", schema_version: 1, storage_id: "bench" });
     if (url.endsWith("/api/auth/session")) return reply({ accessToken: "synthetic", user: { id: "synthetic" } });
-    if (url.includes("/conversations?")) return reply({ total: ids.length, items: ids.map(id => ({ id, update_time: 100 })) });
+    if (url.includes("/conversations?")) {
+      const offset = Number(new URL(url).searchParams.get("offset"));
+      return reply({ total: ids.length, items: ids.slice(offset, offset + 3).map(id => ({ id, update_time: 100 })) });
+    }
     if (url.includes("/conversation/")) { details++; return reply({ conversation_id: url.split("/").pop(), title: "Synthetic", current_node: "n", mapping: {}, update_time: 100, metadata: "x".repeat(512 * 1024) }); }
-    if (url.endsWith("/v1/chatgpt")) return reply({ status: "skipped", save_ms: 0.1 });
+    if (url.endsWith("/v1/chatgpt")) {
+      const body = JSON.parse(options.body).conversation;
+      disk.set(body.conversation_id, body.update_time);
+      return reply({ status: "skipped", save_ms: 0.1 });
+    }
     throw new Error("Unexpected endpoint");
   };
   try {
@@ -67,10 +81,23 @@ test("snapshots are queued once, stage writes remain small, and unchanged detail
     assert.equal(details, 16, "a later manual check skips unchanged details");
     clock += 24 * 3600000;
     await run();
-    assert.equal(details, 21, "old unchanged details have a five-item verification budget");
+    assert.equal(details, 16, "age never forces downloads of unchanged disk versions");
     clock += 24 * 3600000;
     await run();
-    assert.equal(details, 24, "verification rotates to the remaining items");
+    assert.equal(details, 16);
+    // Browser history/acknowledgements are not required to skip existing disk archives.
+    const instance = await db.openStore();
+    await new Promise((resolve, reject) => {
+      const tx = instance.transaction(["meta", "runs", "results"], "readwrite");
+      for (const table of ["meta", "runs", "results"]) tx.objectStore(table).clear();
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    });
+    await run();
+    assert.equal(details, 16, "fresh browser state still consults disk");
+    disk.delete(ids[0]);
+    disk.set(ids[1], 50);
+    await run();
+    assert.equal(details, 18, "missing and older disk snapshots are fetched");
     const dbInstance = await db.openStore();
     const pending = await new Promise(resolve => { const request = dbInstance.transaction("pending").objectStore("pending").count(); request.onsuccess = () => resolve(request.result); });
     assert.equal(pending, 0, "confirmed snapshots are removed");
